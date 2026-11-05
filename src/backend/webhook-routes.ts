@@ -28,7 +28,7 @@ import type { ReplayGuard } from "./replay-guard.js";
  * `type` không hợp lệ bị từ chối 400 ở `parseIndexEvents` TRƯỚC khi có job nào vào
  * hàng đợi (cả mảng bị từ chối nếu một phần tử sai). Route chỉ đẩy job vào hàng đợi
  * rồi trả 202; việc chọn collection theo `job.type` và index do worker (tiến trình
- * riêng) làm, nên tiến trình web không cần khoá OpenRouter/Qdrant.
+ * riêng) làm, nên tiến trình web không cần khoá Gemini/Qdrant.
  */
 
 export const WEBHOOK_IDEA_APPROVED_PATH = "/webhooks/idea-approved";

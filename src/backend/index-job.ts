@@ -1,5 +1,5 @@
 import { chunkText, DEFAULT_CHUNK_CHARS } from "./chunker.js";
-import type { Embedder } from "./openrouter-embeddings.js";
+import type { Embedder } from "./embeddings.js";
 import { pointId, type VectorPoint, type VectorStores } from "./vector-store.js";
 import type { RecordType } from "./record-type.js";
 import type { JobHandler, JobOutcome, RetryPolicy } from "./job-queue.js";

@@ -1,18 +1,21 @@
 import { createHash } from "node:crypto";
 
 /**
- * Embedding client qua OpenRouter: POST {baseUrl}/embeddings (tương thích
- * OpenAI). Model mặc định đã chốt ở GĐ0: openai/text-embedding-3-small
- * (1536 chiều). Model dùng khi query PHẢI trùng model dùng khi index, nên
- * model được ghi vào payload của từng point (xem vector-store.ts).
+ * Embedding client qua Gemini: POST {baseUrl}/embeddings (endpoint tương thích
+ * OpenAI của Gemini API). Model mặc định gemini-embedding-001 mặc định ra 3072
+ * chiều nhưng cắt được về 128..3072 (khuyến nghị 768, 1536, 3072), nên request
+ * luôn gửi `dimensions` để ra đúng 1536 chiều, khớp collection Qdrant đã tạo.
+ * Model dùng khi query PHẢI trùng model dùng khi index, nên model được ghi vào
+ * payload của từng point (xem vector-store.ts).
  *
  * Client này không tự retry: worker index (GĐ2) quyết định retry dựa trên
  * `error.retryable`. Thông báo lỗi chỉ chứa mã HTTP, không bao giờ chứa API
  * key, nội dung văn bản gửi đi hay body phản hồi của provider.
  */
 
-export const DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
-export const DEFAULT_EMBEDDING_MODEL = "openai/text-embedding-3-small";
+export const DEFAULT_GEMINI_BASE_URL =
+  "https://generativelanguage.googleapis.com/v1beta/openai";
+export const DEFAULT_EMBEDDING_MODEL = "gemini-embedding-001";
 export const DEFAULT_EMBEDDING_DIMENSIONS = 1536;
 
 export interface EmbeddingConfig {
@@ -30,7 +33,6 @@ export type EmbeddingErrorCode =
   | "NOT_CONFIGURED"
   | "INVALID_INPUT"
   | "AUTH_ERROR"
-  | "QUOTA_EXCEEDED"
   | "BAD_REQUEST"
   | "RATE_LIMITED"
   | "UPSTREAM_ERROR"
@@ -73,11 +75,11 @@ export function loadEmbeddingConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): EmbeddingConfig {
   return {
-    baseUrl: (env.OPENROUTER_BASE_URL || DEFAULT_OPENROUTER_BASE_URL).replace(
+    baseUrl: (env.GEMINI_BASE_URL || DEFAULT_GEMINI_BASE_URL).replace(
       /\/+$/,
       "",
     ),
-    apiKey: env.OPENROUTER_API_KEY ?? "",
+    apiKey: env.GEMINI_API_KEY ?? "",
     model: env.EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL,
     dimensions: positiveInteger(
       env.EMBEDDING_DIMENSIONS,
@@ -99,21 +101,21 @@ export function createEmbedderFromEnv(
   const config = loadEmbeddingConfig(env);
   return env.EMBEDDING_MOCK_MODE === "true"
     ? createMockEmbedder(config.dimensions)
-    : createOpenRouterEmbedder(config);
+    : createHttpEmbedder(config);
 }
 
-export function createOpenRouterEmbedder(config: EmbeddingConfig): Embedder {
+export function createHttpEmbedder(config: EmbeddingConfig): Embedder {
   if (!config.apiKey) {
     throw new EmbeddingError(
       "NOT_CONFIGURED",
-      "Embedding chưa được cấu hình (thiếu OPENROUTER_API_KEY)",
+      "Embedding chưa được cấu hình (thiếu GEMINI_API_KEY; OPENROUTER_API_KEY không còn được đọc)",
     );
   }
 
   return async function embed(texts: string[]): Promise<number[][]> {
     assertTexts(texts);
     const vectors: number[][] = [];
-    // Tuần tự có chủ ý: queue index chạy tuần tự để kiểm soát tải lên OpenRouter.
+    // Tuần tự có chủ ý: queue index chạy tuần tự để kiểm soát tải lên Gemini (free tier giới hạn request mỗi phút).
     for (let start = 0; start < texts.length; start += config.batchSize) {
       const batch = texts.slice(start, start + config.batchSize);
       vectors.push(...(await embedBatch(batch, config)));
@@ -138,6 +140,7 @@ async function embedBatch(
         model: config.model,
         input: batch,
         encoding_format: "float",
+        dimensions: config.dimensions,
       }),
       signal: AbortSignal.timeout(config.timeoutMs),
     });
@@ -158,7 +161,7 @@ async function embedBatch(
     if (isTimeout(error)) throw transportError(error);
     throw new EmbeddingError(
       "BAD_RESPONSE",
-      "OpenRouter trả response không phải JSON hợp lệ",
+      "Gemini trả response không phải JSON hợp lệ",
       { cause: error },
     );
   }
@@ -178,7 +181,7 @@ function parseEmbeddings(
   ) {
     throw new EmbeddingError(
       "BAD_RESPONSE",
-      "OpenRouter trả số embedding không khớp số văn bản đã gửi",
+      "Gemini trả số embedding không khớp số văn bản đã gửi",
     );
   }
 
@@ -200,7 +203,7 @@ function parseEmbeddings(
     ) {
       throw new EmbeddingError(
         "BAD_RESPONSE",
-        `OpenRouter trả embedding sai định dạng hoặc sai số chiều (kỳ vọng ${dimensions})`,
+        `Gemini trả embedding sai định dạng hoặc sai số chiều (kỳ vọng ${dimensions})`,
       );
     }
     ordered[item.index as number] = item.embedding as number[];
@@ -213,30 +216,24 @@ function statusError(status: number): EmbeddingError {
   if (status === 401 || status === 403) {
     return new EmbeddingError(
       "AUTH_ERROR",
-      `OpenRouter từ chối xác thực (HTTP ${status})`,
-    );
-  }
-  if (status === 402) {
-    return new EmbeddingError(
-      "QUOTA_EXCEEDED",
-      "OpenRouter báo hết credit (HTTP 402)",
+      `Gemini từ chối xác thực (HTTP ${status})`,
     );
   }
   if (status === 408 || status === 429) {
     return new EmbeddingError(
       "RATE_LIMITED",
-      `OpenRouter giới hạn tốc độ hoặc quá thời gian (HTTP ${status})`,
+      `Gemini giới hạn tốc độ/hết quota hoặc quá thời gian (HTTP ${status})`,
     );
   }
   if (status >= 500) {
     return new EmbeddingError(
       "UPSTREAM_ERROR",
-      `OpenRouter trả lỗi máy chủ (HTTP ${status})`,
+      `Gemini trả lỗi máy chủ (HTTP ${status})`,
     );
   }
   return new EmbeddingError(
     "BAD_REQUEST",
-    `OpenRouter từ chối request (HTTP ${status})`,
+    `Gemini từ chối request (HTTP ${status})`,
   );
 }
 
@@ -244,11 +241,11 @@ function transportError(error: unknown): EmbeddingError {
   if (isTimeout(error)) {
     return new EmbeddingError(
       "TIMEOUT",
-      "Gọi OpenRouter quá thời gian cho phép",
+      "Gọi Gemini quá thời gian cho phép",
       { cause: error },
     );
   }
-  return new EmbeddingError("NETWORK_ERROR", "Không thể kết nối tới OpenRouter", {
+  return new EmbeddingError("NETWORK_ERROR", "Không thể kết nối tới Gemini", {
     cause: error,
   });
 }
@@ -278,7 +275,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /**
  * Embedding giả, xác định (cùng văn bản cho cùng vector), chỉ để phát triển và
- * test khi chưa có OpenRouter. Dùng túi từ băm rồi chuẩn hoá L2 nên văn bản
+ * test khi chưa có khoá Gemini. Dùng túi từ băm rồi chuẩn hoá L2 nên văn bản
  * chung nhiều từ cho vector gần nhau. KHÔNG dùng trong production.
  */
 export function createMockEmbedder(

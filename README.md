@@ -19,7 +19,7 @@ Editable source lives in `src/`. Generated frontend and backend output lives in 
 
 Kiểm tra mức độ tương đồng giữa một hồ sơ đầu vào và **toàn bộ sáng kiến cùng loại đã
 được duyệt và index trong Qdrant** (hướng A: lấy tất cả ứng viên, không tìm theo
-vector), rồi để model chấm điểm qua OpenRouter. Dữ liệu trong Qdrant do luồng index
+vector), rồi để model Gemini chấm điểm. Dữ liệu trong Qdrant do luồng index
 (webhook → BullMQ → worker) nạp. `type` là `ideas`, `solutions` hoặc `initiatives`, mỗi
 loại nằm ở một collection riêng (xem [Mô hình dữ liệu](#mô-hình-dữ-liệu-3-collection-theo-type)).
 Xem contract đầy đủ trong:
@@ -110,7 +110,7 @@ thực của Core (không bao giờ với body hay header). Đặt nhiều danh 
 - **Body lỗi có mã truy vết và lý do gốc của lỗi chấm điểm.** Mọi lỗi của tool kèm
   `requestId` (cùng giá trị header `x-request-id` và field `requestId` trong log
   `check_duplicates_failed`). Riêng `502 SCORING_UNAVAILABLE` do scorer gây ra còn có `cause`
-  (`BAD_OUTPUT`, `TIMEOUT`, `AUTH_ERROR`, `NETWORK_ERROR`) và `detail` (chỉ các field trong
+  (`BAD_OUTPUT`, `TIMEOUT`, `RATE_LIMITED`, `AUTH_ERROR`, `NETWORK_ERROR`) và `detail` (chỉ các field trong
   allow-list: `reason`, `finishReason`, `jsonType`, `contentLength`, `topLevelKeyCount`,
   `expectedCount`, `scoredCount`). Ví dụ output bị cắt:
   `{"code":"SCORING_UNAVAILABLE","message":"…","requestId":"…","cause":"BAD_OUTPUT","detail":{"reason":"truncated","finishReason":"length","contentLength":371}}`.
@@ -126,7 +126,7 @@ thực của Core (không bao giờ với body hay header). Đặt nhiều danh 
 ### Cấu hình
 
 Copy `.env.example` thành `.env` và chỉnh các biến. Tiến trình **web** cần cấu hình Qdrant
-(cùng Qdrant và cùng `QDRANT_COLLECTION_PREFIX` với worker), `OPENROUTER_API_KEY`,
+(cùng Qdrant và cùng `QDRANT_COLLECTION_PREFIX` với worker), `GEMINI_API_KEY`,
 `LLM_SCORER_MODEL` và danh sách người gọi. Biến chính của tool:
 
 | Biến | Mô tả |
@@ -134,16 +134,47 @@ Copy `.env.example` thành `.env` và chỉnh các biến. Tiến trình **web**
 | `CHECK_DUPLICATES_ALLOWED_SUBS`, `_OIDS`, `_WIDS` | Danh sách claim được phép gọi tool (phân tách bằng dấu phẩy, AND giữa các danh sách). Không đặt danh sách nào thì 403 cho tất cả. |
 | `CHECK_DUPLICATES_CANDIDATE_LIMIT` | Trần số sáng kiến gửi cho model (mặc định 100, tối đa 500). |
 | `CHECK_DUPLICATES_DEADLINE_MS` | Tổng thời gian cho cả lời gọi (mặc định 28000, nhỏ hơn `timeoutMs` 30000 của tool). |
-| `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL` | Khoá và base URL OpenRouter, dùng chung với embedding. |
-| `LLM_SCORER_MODEL` | Model chấm điểm. **Không có mặc định.** Chưa chốt model cho Staging/production: đã đo `claude-haiku-5.5` đạt mốc 15 giây, các model `:free` thì không (xem `docs/ke-hoach-phat-trien.md`, quyết định #15). |
-| `LLM_SCORER_BATCH_SIZE`, `LLM_SCORER_CONCURRENCY`, `LLM_SCORER_TIMEOUT_MS`, `LLM_SCORER_MAX_CANDIDATE_CHARS` | Số ứng viên mỗi lần gọi (5), số lần gọi song song (20), trần thời gian mỗi lần (25000ms), phần nội dung tối đa mỗi ứng viên (4000 ký tự). |
+| `GEMINI_API_KEY`, `GEMINI_BASE_URL` | Khoá Gemini API và base URL endpoint tương thích OpenAI (mặc định `https://generativelanguage.googleapis.com/v1beta/openai`), dùng chung cho scorer và embedding. `OPENROUTER_*` không còn được đọc. |
+| `LLM_SCORER_BASE_URL`, `LLM_SCORER_API_KEY` | Tuỳ chọn: khoá/endpoint riêng cho scorer, không ảnh hưởng embedding. Hạn mức free tier tính theo project chứ không theo khoá, nên khoá của project khác có hạn mức riêng. Không đặt thì dùng `GEMINI_*`. Đã đặt `LLM_SCORER_BASE_URL` thì bắt buộc đặt `LLM_SCORER_API_KEY`: `GEMINI_API_KEY` không bao giờ được gửi sang host khác. |
+| `LLM_SCORER_REASONING_EFFORT` | Tuỳ chọn: `none`, `minimal`, `low`, `medium` hoặc `high`, gửi làm `reasoning_effort`. Không đặt thì không gửi. Dùng khi model reasoning ăn hết `max_tokens` làm output bị cắt. Giá trị sai thì tool trả `503 TOOL_NOT_CONFIGURED`. |
+| `LLM_SCORER_MODEL` | Model chấm điểm (tên Gemini, ví dụ `gemini-2.5-flash`). **Không có mặc định.** Chưa đo thời gian với Gemini: chạy `npx tsx scripts/check-gemini.ts` (xem [Chuyển sang Gemini](#chuyển-sang-gemini-free-tier)). |
+| `LLM_SCORER_BATCH_SIZE`, `LLM_SCORER_CONCURRENCY`, `LLM_SCORER_TIMEOUT_MS`, `LLM_SCORER_MAX_CANDIDATE_CHARS` | Số ứng viên mỗi lần gọi (5), số lần gọi song song (20), trần thời gian mỗi lần (25000ms), phần nội dung tối đa mỗi ứng viên (4000 ký tự). Mặc định đo với model khác; với free tier cần chỉnh theo hạn mức (xem bên dưới). |
 | `QDRANT_URL` | URL REST của Qdrant, ví dụ `http://localhost:6333` (Docker local). |
 | `QDRANT_COLLECTION_PREFIX` | Tiền tố của ba collection `<tiền tố>_ideas`, `_solutions`, `_initiatives`. Mỗi môi trường một tiền tố. Thay `QDRANT_COLLECTION`. |
 | `QDRANT_API_KEY` | Không cần với Qdrant local. Chỉ bắt buộc khi `QDRANT_URL` không phải localhost (và phải `https`). |
 | `LLM_MOCK_MODE`, `QDRANT_MOCK_MODE` | `true` dùng scorer mock / kho trong bộ nhớ (ba kho theo type, rỗng, không chia sẻ với worker). Không đặt nghĩa là dùng dịch vụ thật. |
 
-Không commit giá trị thật của `OPENROUTER_API_KEY`, `QDRANT_API_KEY` (nếu có dùng),
-`WEBHOOK_HMAC_SECRETS`.
+Không commit giá trị thật của `GEMINI_API_KEY`, `LLM_SCORER_API_KEY`, `QDRANT_API_KEY` (nếu
+có dùng), `WEBHOOK_HMAC_SECRETS`.
+
+### Chuyển sang Gemini (free tier)
+
+Scorer và embedding đều gọi endpoint tương thích OpenAI của Gemini bằng `GEMINI_API_KEY`.
+Các điều cần biết khi dùng free tier và khi đổi từ OpenRouter:
+
+1. **Kiểm thử bằng khoá thật trước khi deploy:** `npx tsx scripts/check-gemini.ts` (thêm
+   `--burst=10` để thử hạn mức). Script gọi đúng code production và kiểm: khoá hợp lệ, model có
+   trong danh sách, chat nhận `response_format`/`max_tokens`/`reasoning_effort`, embedding nhận
+   `dimensions`. Nó chỉ in mã HTTP, tên model, số chiều và thời gian, không in khoá hay body.
+2. **Hạn mức free tier thấp và tính theo project.** Mỗi lần check dùng
+   `ceil(số ứng viên / LLM_SCORER_BATCH_SIZE)` request; mặc định batch 5 là 20 request cho 100
+   ứng viên và dễ trả `429`. Khi đó response có `cause: "RATE_LIMITED"`. Tăng
+   `LLM_SCORER_BATCH_SIZE` và giảm `LLM_SCORER_CONCURRENCY` cho khớp hạn mức trong AI Studio; batch
+   lớn thì mỗi lần gọi chậm hơn nên phải đo lại với `CHECK_DUPLICATES_DEADLINE_MS`.
+3. **Thinking bật mặc định** và token suy nghĩ có thể làm output bị cắt
+   (`cause: "BAD_OUTPUT"`, `detail.reason: "truncated"`). Đặt `LLM_SCORER_REASONING_EFFORT=none`
+   (2.5 Flash cho phép; 2.5 Pro và dòng 3 không tắt được).
+4. **Embedding:** `gemini-embedding-001` mặc định 3072 chiều, app gửi `dimensions: 1536` để khớp
+   collection Qdrant hiện có (không phải tạo lại collection). Vector đã index bằng
+   `text-embedding-3-small` vẫn nằm trong collection nhưng **không so sánh được** với vector mới.
+   Tool `check-duplicates` hiện chỉ đọc nội dung nên không bị ảnh hưởng; cần index lại toàn bộ
+   (VNAIP BE gửi lại sự kiện, hoặc `scripts/seed-ideas.ts`) trước khi dùng top-k theo vector (hướng B).
+5. **Dữ liệu gửi cho Google:** nội dung sáng kiến được gửi tới Gemini API. Điều khoản của free tier
+   khác bản trả phí về việc Google có dùng dữ liệu để cải thiện sản phẩm hay không; đọc điều khoản
+   hiện hành trước khi dùng dữ liệu thật.
+6. **Đổi env ở nơi deploy:** thay `OPENROUTER_API_KEY` bằng `GEMINI_API_KEY` (và đặt
+   `LLM_SCORER_MODEL` kiểu Gemini) cho cả web lẫn worker. Thiếu thì tool trả
+   `503 TOOL_NOT_CONFIGURED`, worker báo `NOT_CONFIGURED`.
 
 ### Chạy local
 
@@ -213,7 +244,7 @@ Các test chính của luồng kiểm tra trùng (xem `src/backend/__tests__/`):
 - `index-job.test.ts`, `webhook-routes.test.ts`, `index-event.test.ts`: webhook từ chối type
   sai (cả theo mảng) trước khi enqueue, worker ghi/reindex/xoá đúng collection, job type cũ
   vào hàng chờ lỗi không retry.
-- `llm-scorer.test.ts`: URL OpenRouter giữ `/api/v1`, batch song song, giới hạn đồng thời,
+- `llm-scorer.test.ts`: URL base giữ nguyên đường dẫn, batch song song, giới hạn đồng thời,
   deadline, một batch lỗi thì cả lời gọi lỗi, không lộ khoá API.
 - `caller-policy.test.ts`, `check-duplicates-http.test.ts`: giới hạn người gọi, qua cả chuỗi
   Express thật + xác thực JWT thật (JWKS giả); claims không khớp bị 403, danh tính khai

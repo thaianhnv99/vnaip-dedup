@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { parseIndexEvent } from '../index-event.js';
 import { chunkText } from '../chunker.js';
 import { processIndexJob } from '../index-job.js';
-import { createMockEmbedder } from '../openrouter-embeddings.js';
+import { createMockEmbedder } from '../embeddings.js';
 import { RECORD_TYPES } from '../record-type.js';
 import { createInMemoryVectorStores } from '../vector-store.js';
 

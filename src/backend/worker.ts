@@ -9,7 +9,7 @@ import { describeStartupError, startIndexWorker } from './index-service.js';
  *
  * Cấu hình bắt buộc khớp với web: REDIS_URL, QUEUE_PREFIX, QUEUE_NAME, và
  * QDRANT_URL + QDRANT_COLLECTION_PREFIX (web đọc đúng các collection worker ghi).
- * Riêng worker cần thêm OPENROUTER_API_KEY; QDRANT_API_KEY chỉ cần khi Qdrant không
+ * Riêng worker cần thêm GEMINI_API_KEY; QDRANT_API_KEY chỉ cần khi Qdrant không
  * chạy trên localhost. Thiếu cấu hình thì thoát mã 1 để nền tảng báo hỏng ngay.
  */
 

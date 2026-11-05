@@ -7,7 +7,7 @@ import { createErrorHandler } from "../error-handler.js";
 import { MAX_BATCH_SIZE } from "../index-event.js";
 import { createIndexJobHandler, type IndexJob } from "../index-job.js";
 import { InMemoryJobQueue, type JobQueue } from "../job-queue.js";
-import { createMockEmbedder } from "../openrouter-embeddings.js";
+import { createMockEmbedder } from "../embeddings.js";
 import { createInMemoryVectorStores } from "../vector-store.js";
 import { RECORD_TYPES } from "../record-type.js";
 import {

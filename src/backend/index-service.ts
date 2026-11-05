@@ -2,7 +2,7 @@ import {
   createEmbedderFromEnv,
   loadEmbeddingConfig,
   EmbeddingError,
-} from "./openrouter-embeddings.js";
+} from "./embeddings.js";
 import { createVectorStoresFromEnv } from "./qdrant-store.js";
 import { VectorStoreError, lazyEnsureCollections } from "./vector-store.js";
 import {
@@ -37,7 +37,7 @@ import {
  * ở hai tiến trình khác nhau (quyết định 2026-11-04):
  *
  * - Web (`server.ts`): `startWebhookService` chỉ nhận event, kiểm tra rồi đẩy job
- *   vào hàng đợi. Không cần khoá OpenRouter hay Qdrant, và việc xử lý nặng của
+ *   vào hàng đợi. Không cần khoá Gemini hay Qdrant, và việc xử lý nặng của
  *   worker (trích text bằng CPU khi có MinIO) không chặn webhook hay /health.
  * - Worker (`worker.ts`): `startIndexWorker` lấy job từng cái một, embed, ghi
  *   Qdrant. Web và worker phải dùng cùng REDIS_URL, QUEUE_PREFIX và QUEUE_NAME.

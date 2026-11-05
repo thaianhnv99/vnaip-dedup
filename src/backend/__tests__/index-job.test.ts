@@ -7,7 +7,7 @@ import {
   type IndexDependencies,
   type IndexJob,
 } from "../index-job.js";
-import { EmbeddingError, createMockEmbedder, type Embedder } from "../openrouter-embeddings.js";
+import { EmbeddingError, createMockEmbedder, type Embedder } from "../embeddings.js";
 import { VectorStoreError, createInMemoryVectorStores, pointId } from "../vector-store.js";
 import { RECORD_TYPES, type RecordType } from "../record-type.js";
 

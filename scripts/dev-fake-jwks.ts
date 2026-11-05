@@ -13,7 +13,7 @@
  * Tool check-duplicates từ chối (403) người gọi không nằm trong allow-list, nên
  * backend phải có trong .env một dòng khớp token giả bên dưới, ví dụ:
  *   CHECK_DUPLICATES_ALLOWED_OIDS=org-dev-test
- * Cùng với QDRANT_* + OPENROUTER_API_KEY + LLM_SCORER_MODEL (hoặc QDRANT_MOCK_MODE=true
+ * Cùng với QDRANT_* + GEMINI_API_KEY + LLM_SCORER_MODEL (hoặc QDRANT_MOCK_MODE=true
  * và LLM_MOCK_MODE=true: kho rỗng nên kết quả luôn rỗng; nạp dữ liệu mẫu bằng
  * scripts/seed-ideas.ts với Qdrant thật).
  */

@@ -5,18 +5,21 @@ import type {
   RawModelMatch,
   ScoreOptions,
 } from "./dedup.js";
-import { DEFAULT_OPENROUTER_BASE_URL } from "./openrouter-embeddings.js";
+import { DEFAULT_GEMINI_BASE_URL } from "./embeddings.js";
 
 /**
- * Chấm độ tương đồng giữa input và từng ứng viên bằng model chat qua OpenRouter
- * (`POST {OPENROUTER_BASE_URL}/chat/completions`, cùng khoá và base URL với
- * embedding).
+ * Chấm độ tương đồng giữa input và từng ứng viên bằng model chat qua endpoint tương
+ * thích OpenAI của Gemini (`POST {baseUrl}/chat/completions`, `Authorization: Bearer
+ * <khoá>`). Mặc định dùng chung khoá và base URL với embedding (`GEMINI_API_KEY`,
+ * `GEMINI_BASE_URL`); đặt `LLM_SCORER_BASE_URL` / `LLM_SCORER_API_KEY` để chỉ scorer đi
+ * qua khoá/endpoint khác. Free tier tính hạn mức theo PROJECT chứ không theo khoá, nên
+ * muốn tách hạn mức của scorer khỏi worker embedding thì dùng khoá của project khác.
  *
  * Nội dung hồ sơ (title/content) được đưa vào model như DỮ LIỆU, không phải chỉ
  * dẫn: prompt nói rõ nội dung có thể chứa văn bản độc hại và không được tuân theo.
  *
  * Ngân sách thời gian: ứng viên được chia batch rồi chấm song song với số lần gọi
- * đồng thời có giới hạn (tránh bị OpenRouter giới hạn tốc độ), mỗi lần gọi bị cắt
+ * đồng thời có giới hạn (tránh bị provider giới hạn tốc độ), mỗi lần gọi bị cắt
  * theo mốc `deadlineAt` chung của cả lời gọi tool. Một batch lỗi thì cả lời gọi
  * lỗi và các batch còn lại bị huỷ: trả điểm của một phần ứng viên sẽ cho kết quả
  * "không trùng" sai ở phần còn lại.
@@ -37,12 +40,23 @@ export interface LlmScorerConfig {
   concurrency: number;
   /** Phần nội dung tối đa của mỗi ứng viên đưa vào prompt (kiểm soát token). */
   maxCandidateChars: number;
+  /**
+   * Gửi nguyên văn làm `reasoning_effort` (tham số tương thích OpenAI) khi có đặt; không
+   * đặt thì không gửi gì và provider dùng mức mặc định của model. Model reasoning tính
+   * token suy nghĩ vào `max_tokens`, nên mặc định bật có thể làm output bị cắt
+   * (`finish_reason=length`).
+   */
+  reasoningEffort?: string;
 }
+
+/** Giá trị `LLM_SCORER_REASONING_EFFORT` được chấp nhận (sai thì NOT_CONFIGURED, không bị bỏ qua im lặng). */
+const REASONING_EFFORTS: ReadonlySet<string> = new Set(["none", "minimal", "low", "medium", "high"]);
 
 export type LlmScorerErrorCode =
   | "NOT_CONFIGURED"
   | "TIMEOUT"
   | "AUTH_ERROR"
+  | "RATE_LIMITED"
   | "NETWORK_ERROR"
   | "BAD_OUTPUT";
 
@@ -76,18 +90,27 @@ function positiveInteger(value: string | undefined, fallback: number): number {
 export function loadLlmScorerConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): LlmScorerConfig {
+  const reasoningEffort = env.LLM_SCORER_REASONING_EFFORT?.trim().toLowerCase();
   return {
-    baseUrl: (env.OPENROUTER_BASE_URL || DEFAULT_OPENROUTER_BASE_URL).replace(
-      /\/+$/,
+    // LLM_SCORER_* chỉ áp dụng cho scorer; không đặt thì dùng chung với embedding.
+    baseUrl: (
+      env.LLM_SCORER_BASE_URL ||
+      env.GEMINI_BASE_URL ||
+      DEFAULT_GEMINI_BASE_URL
+    ).replace(/\/+$/, ""),
+    // Đã đổi base URL riêng cho scorer thì BẮT BUỘC có khoá riêng: không được rơi về
+    // GEMINI_API_KEY, vì như vậy sẽ gửi khoá này tới host của endpoint khác.
+    apiKey:
+      env.LLM_SCORER_API_KEY ||
+      (env.LLM_SCORER_BASE_URL ? "" : env.GEMINI_API_KEY) ||
       "",
-    ),
-    apiKey: env.OPENROUTER_API_KEY ?? "",
     // Không có model mặc định: chọn model là quyết định về chi phí và chất lượng.
     model: env.LLM_SCORER_MODEL ?? "",
     timeoutMs: positiveInteger(env.LLM_SCORER_TIMEOUT_MS, 25000),
     batchSize: positiveInteger(env.LLM_SCORER_BATCH_SIZE, 5),
     concurrency: positiveInteger(env.LLM_SCORER_CONCURRENCY, 20),
     maxCandidateChars: positiveInteger(env.LLM_SCORER_MAX_CANDIDATE_CHARS, 4000),
+    ...(reasoningEffort ? { reasoningEffort } : {}),
   };
 }
 
@@ -111,7 +134,14 @@ export function createLlmScorer(
   if (!config.apiKey || !config.model) {
     throw new LlmScorerError(
       "NOT_CONFIGURED",
-      "LLM scorer chưa được cấu hình (thiếu OPENROUTER_API_KEY hoặc LLM_SCORER_MODEL)",
+      "LLM scorer chưa được cấu hình (thiếu GEMINI_API_KEY / LLM_SCORER_API_KEY hoặc LLM_SCORER_MODEL; OPENROUTER_API_KEY không còn được đọc)",
+    );
+  }
+  if (config.reasoningEffort !== undefined && !REASONING_EFFORTS.has(config.reasoningEffort)) {
+    // Sai chính tả mà bỏ qua im lặng thì model vẫn suy nghĩ mặc định và output lại bị cắt.
+    throw new LlmScorerError(
+      "NOT_CONFIGURED",
+      `LLM_SCORER_REASONING_EFFORT không hợp lệ (cho phép: ${[...REASONING_EFFORTS].join(", ")})`,
     );
   }
   return (input, candidates, options) =>
@@ -170,10 +200,11 @@ export async function scoreCandidatesWithLlm(
  * song song nên thời gian do độ dài ĐẦU RA của mỗi lần gọi quyết định, không phải số sáng kiến.
  *
  * Trần token đầu ra mỗi lần gọi = 250 token cho mỗi ứng viên + 300 cho phần bao quanh.
- * BẮT BUỘC đặt: không có `max_tokens`, OpenRouter tính trước theo mức tối đa của model
- * (65536 với Sonnet) và từ chối bằng HTTP 402 khi số dư không đủ cho mức đó, dù lời gọi
- * thực tế chỉ tốn vài trăm token (gặp ở lần chạy thật 2026-11-04). Cũng chặn chi phí
- * và độ trễ khi model nói dài. Mỗi mục kết quả là id + percent + một hai câu lý do.
+ * BẮT BUỘC đặt: không có `max_tokens`, provider tính trước theo mức tối đa của model (khi
+ * dùng OpenRouter với Sonnet là 65536 token, bị từ chối bằng HTTP 402 khi số dư không đủ
+ * dù lời gọi thực tế chỉ tốn vài trăm token; gặp ở lần chạy thật 2026-11-04). Cũng chặn
+ * chi phí và độ trễ khi model nói dài. Mỗi mục kết quả là id + percent + một hai câu lý do.
+ * Model reasoning tính cả token suy nghĩ vào trần này: xem `LLM_SCORER_REASONING_EFFORT`.
  */
 const OUTPUT_TOKENS_PER_CANDIDATE = 250;
 const OUTPUT_TOKENS_OVERHEAD = 300;
@@ -217,6 +248,7 @@ async function scoreBatch(
         temperature: 0,
         max_tokens: OUTPUT_TOKENS_PER_CANDIDATE * batch.length + OUTPUT_TOKENS_OVERHEAD,
         response_format: { type: "json_object" },
+        ...(config.reasoningEffort ? { reasoning_effort: config.reasoningEffort } : {}),
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
           {
@@ -240,6 +272,15 @@ async function scoreBatch(
       throw new LlmScorerError(
         "AUTH_ERROR",
         `Model provider từ chối xác thực (HTTP ${response.status})`,
+      );
+    }
+    if (response.status === 429) {
+      // Free tier hết hạn mức (mỗi phút hoặc mỗi ngày): tách riêng để caller biết đây là
+      // quota chứ không phải lỗi mạng. Không retry vì còn ngân sách thời gian chung.
+      void response.body?.cancel().catch(() => undefined);
+      throw new LlmScorerError(
+        "RATE_LIMITED",
+        "Model provider giới hạn tốc độ hoặc hết quota (HTTP 429)",
       );
     }
     if (!response.ok) {

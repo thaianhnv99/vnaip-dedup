@@ -4,7 +4,7 @@ import { createQdrantCandidateFinder } from "../candidate-source.js";
 import { checkDuplicates, DedupError, type DedupDependencies, type DedupInput } from "../dedup.js";
 import { processIndexJob, type IndexJob } from "../index-job.js";
 import { createLlmScorer } from "../llm-scorer.js";
-import { createMockEmbedder } from "../openrouter-embeddings.js";
+import { createMockEmbedder } from "../embeddings.js";
 import { createInMemoryVectorStores, type VectorStores } from "../vector-store.js";
 import { RECORD_TYPES, type RecordType } from "../record-type.js";
 import { assertValidDedupOutput } from "../validate-output.js";
@@ -13,7 +13,7 @@ import { startFakeServer, type RecordedRequest } from "./helpers/fake-http-serve
 /**
  * Mốc MVP của kế hoạch: một sáng kiến được duyệt → được index → kiểm tra trùng tìm
  * thấy nó. Ghép các mảnh THẬT (processIndexJob, store, finder, scorer qua HTTP,
- * checkDuplicates, validate output); chỉ embedding là mock và OpenRouter là server giả.
+ * checkDuplicates, validate output); chỉ embedding là mock và Gemini là server giả.
  */
 
 const DIMS = 16;
@@ -42,7 +42,7 @@ async function seed(stores: VectorStores, jobs: IndexJob[], chunkChars = 2000) {
   }
 }
 
-/** OpenRouter giả: chấm cao khi ứng viên chứa từ khoá "sự cố", thấp nếu không. */
+/** Gemini giả: chấm cao khi ứng viên chứa từ khoá "sự cố", thấp nếu không. */
 function fakeScoring(request: RecordedRequest) {
   const payload = JSON.parse(request.body.messages[1].content) as {
     candidates: Array<{ candidateId: string; title: string; content: string }>;

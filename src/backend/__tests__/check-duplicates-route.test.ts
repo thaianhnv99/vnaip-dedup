@@ -6,7 +6,7 @@ import type { Request, Response } from 'express';
 import { LlmScorerError } from '../llm-scorer.js';
 import { VectorStoreError, pointId } from '../vector-store.js';
 import { createVectorStoresFromEnv } from '../qdrant-store.js';
-import { DEFAULT_EMBEDDING_DIMENSIONS } from '../openrouter-embeddings.js';
+import { DEFAULT_EMBEDDING_DIMENSIONS } from '../embeddings.js';
 import { DedupError } from '../dedup.js';
 
 function fakeRequestResponse(body: unknown) {
@@ -195,7 +195,7 @@ test('NOT_CONFIGURED của scorer không lộ qua cause dù bị bọc trong SCO
   const deps: DedupDependencies = {
     findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'A', content: 'x' }],
     scoreCandidates: async () => {
-      throw new LlmScorerError('NOT_CONFIGURED', 'thiếu OPENROUTER_API_KEY hoặc LLM_SCORER_MODEL');
+      throw new LlmScorerError('NOT_CONFIGURED', 'thiếu GEMINI_API_KEY hoặc LLM_SCORER_MODEL');
     },
   };
   const handler = createCheckDuplicatesHandler(deps, {});
@@ -205,7 +205,7 @@ test('NOT_CONFIGURED của scorer không lộ qua cause dù bị bọc trong SCO
 
   assert.equal((state.body as any).code, 'SCORING_UNAVAILABLE');
   assert.equal('cause' in (state.body as object), false);
-  assert.doesNotMatch(JSON.stringify(state.body), /OPENROUTER|LLM_SCORER/);
+  assert.doesNotMatch(JSON.stringify(state.body), /GEMINI|LLM_SCORER/);
 });
 
 test('không có ứng viên trả 200 với matches rỗng (phân biệt với lỗi)', async () => {

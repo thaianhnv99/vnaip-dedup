@@ -42,7 +42,7 @@ test("web, thiếu cấu hình: trả null và ghi log, không ném lỗi làm s
   for (const [name, env] of [
     ["thiếu HMAC secret", { ...mockEnv, WEBHOOK_HMAC_SECRETS: "" }],
     // Chế độ mock chạy worker cùng tiến trình nên vẫn cần cấu hình embedding/Qdrant.
-    ["mock queue thiếu OpenRouter key", { ...mockEnv, EMBEDDING_MOCK_MODE: undefined }],
+    ["mock queue thiếu Gemini key", { ...mockEnv, EMBEDDING_MOCK_MODE: undefined }],
     ["mock queue thiếu Qdrant", { ...mockEnv, QDRANT_MOCK_MODE: undefined }],
   ] as const) {
     const { logs, log } = captureLogs();
@@ -63,7 +63,7 @@ test("web, không đặt QUEUE_MOCK_MODE và thiếu REDIS_URL: service tắt v�
   assert.match(String(logs[0]!.message), /REDIS_URL/);
 });
 
-test("web dùng BullMQ chỉ cần REDIS_URL và HMAC secret, không cần khoá OpenRouter/Qdrant; không chạy worker", async () => {
+test("web dùng BullMQ chỉ cần REDIS_URL và HMAC secret, không cần khoá Gemini/Qdrant; không chạy worker", async () => {
   const { logs, log } = captureLogs();
   const startedAt = Date.now();
   const service = await startWebhookService(
@@ -145,7 +145,7 @@ test("worker: thiếu cấu hình thì ném lỗi (để tiến trình thoát m�
   const base = { ...unreachableRedis, EMBEDDING_MOCK_MODE: "true", QDRANT_MOCK_MODE: "true" } as NodeJS.ProcessEnv;
   for (const [name, env, pattern] of [
     ["thiếu REDIS_URL", { ...base, REDIS_URL: undefined }, /REDIS_URL/],
-    ["thiếu OpenRouter key", { ...base, EMBEDDING_MOCK_MODE: undefined }, /OPENROUTER/],
+    ["thiếu Gemini key", { ...base, EMBEDDING_MOCK_MODE: undefined }, /GEMINI/],
     ["thiếu Qdrant", { ...base, QDRANT_MOCK_MODE: undefined }, /Qdrant/],
   ] as const) {
     await assert.rejects(

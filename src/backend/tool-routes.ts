@@ -13,7 +13,7 @@ import {
 export interface ToolRouteOptions {
   /** Mặc định đọc từ CHECK_DUPLICATES_ALLOWED_* trong env. */
   callerPolicy?: CallerPolicy;
-  /** Mặc định: handler thật (Qdrant + OpenRouter, dựng ở lần gọi đầu). Test truyền handler giả. */
+  /** Mặc định: handler thật (Qdrant + Gemini, dựng ở lần gọi đầu). Test truyền handler giả. */
   checkDuplicates?: RequestHandler;
 }
 

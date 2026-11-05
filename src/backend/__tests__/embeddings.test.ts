@@ -4,10 +4,10 @@ import {
   EmbeddingError,
   createEmbedderFromEnv,
   createMockEmbedder,
-  createOpenRouterEmbedder,
+  createHttpEmbedder,
   loadEmbeddingConfig,
   type EmbeddingConfig,
-} from "../openrouter-embeddings.js";
+} from "../embeddings.js";
 import { startFakeServer } from "./helpers/fake-http-server.js";
 
 const DIMS = 4;
@@ -17,7 +17,7 @@ function configFor(origin: string, overrides: Partial<EmbeddingConfig> = {}): Em
   return {
     baseUrl: `${origin}/api/v1`,
     apiKey: API_KEY,
-    model: "openai/text-embedding-3-small",
+    model: "gemini-embedding-001",
     dimensions: DIMS,
     timeoutMs: 2000,
     batchSize: 64,
@@ -32,7 +32,7 @@ function vectorFor(seed: number): number[] {
 function okBody(count: number, order: number[] = [...Array(count).keys()]) {
   return {
     object: "list",
-    model: "openai/text-embedding-3-small",
+    model: "gemini-embedding-001",
     data: order.map((index) => ({
       object: "embedding",
       index,
@@ -48,7 +48,7 @@ test("gửi đúng endpoint, header, model và trả vector theo thứ tự đ�
     json: okBody(request.body.input.length, [2, 0, 1]),
   }));
   try {
-    const embed = createOpenRouterEmbedder(configFor(server.origin));
+    const embed = createHttpEmbedder(configFor(server.origin));
     const vectors = await embed(["a", "b", "c"]);
 
     assert.deepEqual(vectors, [vectorFor(0), vectorFor(1), vectorFor(2)]);
@@ -56,10 +56,13 @@ test("gửi đúng endpoint, header, model và trả vector theo thứ tự đ�
     assert.equal(request!.method, "POST");
     assert.equal(request!.url, "/api/v1/embeddings");
     assert.equal(request!.headers.authorization, `Bearer ${API_KEY}`);
+    // `dimensions` luôn được gửi: gemini-embedding-001 mặc định ra 3072 chiều, còn collection
+    // Qdrant là 1536 (xem DEFAULT_EMBEDDING_DIMENSIONS).
     assert.deepEqual(request!.body, {
-      model: "openai/text-embedding-3-small",
+      model: "gemini-embedding-001",
       input: ["a", "b", "c"],
       encoding_format: "float",
+      dimensions: DIMS,
     });
   } finally {
     await server.close();
@@ -77,7 +80,7 @@ test("chia batch theo batchSize và ghép kết quả đúng thứ tự", async 
     },
   }));
   try {
-    const embed = createOpenRouterEmbedder(configFor(server.origin, { batchSize: 2 }));
+    const embed = createHttpEmbedder(configFor(server.origin, { batchSize: 2 }));
     const vectors = await embed(["0", "1", "2", "3", "4"]);
 
     assert.equal(server.requests.length, 3);
@@ -94,7 +97,7 @@ test("chia batch theo batchSize và ghép kết quả đúng thứ tự", async 
 test("danh sách rỗng không gọi mạng", async () => {
   const server = await startFakeServer(() => ({ status: 200, json: okBody(0) }));
   try {
-    const embed = createOpenRouterEmbedder(configFor(server.origin));
+    const embed = createHttpEmbedder(configFor(server.origin));
     assert.deepEqual(await embed([]), []);
     assert.equal(server.requests.length, 0);
   } finally {
@@ -105,7 +108,7 @@ test("danh sách rỗng không gọi mạng", async () => {
 test("văn bản rỗng bị từ chối trước khi gọi mạng", async () => {
   const server = await startFakeServer(() => ({ status: 200, json: okBody(1) }));
   try {
-    const embed = createOpenRouterEmbedder(configFor(server.origin));
+    const embed = createHttpEmbedder(configFor(server.origin));
     await assert.rejects(
       () => embed(["ok", "   "]),
       (error: unknown) => error instanceof EmbeddingError && error.code === "INVALID_INPUT",
@@ -124,11 +127,11 @@ test("response sai số chiều hoặc sai số lượng bị coi là BAD_RESPON
   const wrongCount = await startFakeServer(() => ({ status: 200, json: okBody(1) }));
   try {
     await assert.rejects(
-      () => createOpenRouterEmbedder(configFor(wrongDimension.origin))(["a"]),
+      () => createHttpEmbedder(configFor(wrongDimension.origin))(["a"]),
       (error: unknown) => error instanceof EmbeddingError && error.code === "BAD_RESPONSE",
     );
     await assert.rejects(
-      () => createOpenRouterEmbedder(configFor(wrongCount.origin))(["a", "b"]),
+      () => createHttpEmbedder(configFor(wrongCount.origin))(["a", "b"]),
       (error: unknown) => error instanceof EmbeddingError && error.code === "BAD_RESPONSE",
     );
   } finally {
@@ -140,7 +143,7 @@ test("response sai số chiều hoặc sai số lượng bị coi là BAD_RESPON
 test("map mã HTTP sang mã lỗi và cờ retryable đúng, không lộ API key", async () => {
   const cases: Array<[number, string, boolean]> = [
     [401, "AUTH_ERROR", false],
-    [402, "QUOTA_EXCEEDED", false],
+    [402, "BAD_REQUEST", false],
     [400, "BAD_REQUEST", false],
     [429, "RATE_LIMITED", true],
     [503, "UPSTREAM_ERROR", true],
@@ -151,7 +154,7 @@ test("map mã HTTP sang mã lỗi và cờ retryable đúng, không lộ API key
       json: { error: { message: `echo ${API_KEY} và nội dung nhạy cảm` } },
     }));
     try {
-      const embed = createOpenRouterEmbedder(configFor(server.origin));
+      const embed = createHttpEmbedder(configFor(server.origin));
       await assert.rejects(
         () => embed(["nội dung hồ sơ nhạy cảm"]),
         (error: unknown) => {
@@ -172,7 +175,7 @@ test("map mã HTTP sang mã lỗi và cờ retryable đúng, không lộ API key
 test("quá thời gian trả TIMEOUT và cho phép retry", async () => {
   const server = await startFakeServer(() => ({ status: 200, json: okBody(1), delayMs: 300 }));
   try {
-    const embed = createOpenRouterEmbedder(configFor(server.origin, { timeoutMs: 50 }));
+    const embed = createHttpEmbedder(configFor(server.origin, { timeoutMs: 50 }));
     await assert.rejects(
       () => embed(["a"]),
       (error: unknown) =>
@@ -187,7 +190,7 @@ test("không kết nối được trả NETWORK_ERROR", async () => {
   const server = await startFakeServer(() => ({ status: 200, json: okBody(1) }));
   const origin = server.origin;
   await server.close();
-  const embed = createOpenRouterEmbedder(configFor(origin));
+  const embed = createHttpEmbedder(configFor(origin));
   await assert.rejects(
     () => embed(["a"]),
     (error: unknown) =>
@@ -195,7 +198,7 @@ test("không kết nối được trả NETWORK_ERROR", async () => {
   );
 });
 
-test("thiếu OPENROUTER_API_KEY báo NOT_CONFIGURED; mock chỉ bật khi EMBEDDING_MOCK_MODE=true", () => {
+test("thiếu GEMINI_API_KEY báo NOT_CONFIGURED; mock chỉ bật khi EMBEDDING_MOCK_MODE=true", () => {
   assert.throws(
     () => createEmbedderFromEnv({}),
     (error: unknown) => error instanceof EmbeddingError && error.code === "NOT_CONFIGURED",
@@ -203,12 +206,28 @@ test("thiếu OPENROUTER_API_KEY báo NOT_CONFIGURED; mock chỉ bật khi EMBED
   assert.doesNotThrow(() => createEmbedderFromEnv({ EMBEDDING_MOCK_MODE: "true" }));
 });
 
-test("loadEmbeddingConfig dùng mặc định đã chốt ở GĐ0", () => {
-  const config = loadEmbeddingConfig({ OPENROUTER_API_KEY: "k" });
-  assert.equal(config.baseUrl, "https://openrouter.ai/api/v1");
-  assert.equal(config.model, "openai/text-embedding-3-small");
+test("OPENROUTER_API_KEY không còn được đọc: chỉ có khoá cũ thì vẫn NOT_CONFIGURED và nói rõ lý do", () => {
+  assert.equal(loadEmbeddingConfig({ OPENROUTER_API_KEY: "old-key" }).apiKey, "");
+  assert.throws(
+    () => createEmbedderFromEnv({ OPENROUTER_API_KEY: "old-key" }),
+    (error: unknown) =>
+      error instanceof EmbeddingError &&
+      error.code === "NOT_CONFIGURED" &&
+      /GEMINI_API_KEY/.test(error.message) &&
+      !error.message.includes("old-key"),
+  );
+});
+
+test("loadEmbeddingConfig dùng mặc định Gemini (1536 chiều khớp collection Qdrant hiện có)", () => {
+  const config = loadEmbeddingConfig({ GEMINI_API_KEY: "k" });
+  assert.equal(config.baseUrl, "https://generativelanguage.googleapis.com/v1beta/openai");
+  assert.equal(config.apiKey, "k");
+  assert.equal(config.model, "gemini-embedding-001");
   assert.equal(config.dimensions, 1536);
   assert.equal(config.batchSize, 64);
+
+  const custom = loadEmbeddingConfig({ GEMINI_BASE_URL: "https://proxy.example.com/v1beta/openai//", GEMINI_API_KEY: "k" });
+  assert.equal(custom.baseUrl, "https://proxy.example.com/v1beta/openai");
 });
 
 test("embedder giả: xác định, chuẩn hoá L2, văn bản giống nhau thì gần nhau hơn", async () => {

@@ -15,7 +15,7 @@ export interface FakeResponse {
 }
 
 /**
- * Server HTTP giả cho test client (OpenRouter, Qdrant). Ghi lại mọi request để
+ * Server HTTP giả cho test client (Gemini, Qdrant). Ghi lại mọi request để
  * test kiểm tra đường dẫn, header và body thực sự được gửi đi.
  */
 export async function startFakeServer(

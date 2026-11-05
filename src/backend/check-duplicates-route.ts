@@ -8,7 +8,7 @@ import { parseDedupInput } from "./validate-input.js";
 import { assertValidDedupOutput } from "./validate-output.js";
 import { createQdrantCandidateFinder } from "./candidate-source.js";
 import { createScorerFromEnv, LlmScorerError } from "./llm-scorer.js";
-import { DEFAULT_EMBEDDING_DIMENSIONS } from "./openrouter-embeddings.js";
+import { DEFAULT_EMBEDDING_DIMENSIONS } from "./embeddings.js";
 import { createVectorStoresFromEnv } from "./qdrant-store.js";
 import { VectorStoreError, lazyEnsureCollections } from "./vector-store.js";
 

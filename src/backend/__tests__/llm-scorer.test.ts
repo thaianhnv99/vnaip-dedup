@@ -64,7 +64,7 @@ function chatContent(content: string) {
   return { status: 200, json: { choices: [{ message: { content } }] } };
 }
 
-test("gọi {baseUrl}/chat/completions và giữ phần /api/v1 của OPENROUTER_BASE_URL (hồi quy lỗi mất /api)", async () => {
+test("gọi {baseUrl}/chat/completions và giữ nguyên phần đường dẫn của base URL (hồi quy lỗi mất /api)", async () => {
   const server = await startFakeServer((request) => scoreAll(request));
   try {
     await scoreCandidatesWithLlm(input, candidates(1), config(server.origin), farFuture());
@@ -494,7 +494,7 @@ test("createLlmScorer báo NOT_CONFIGURED ngay khi dựng nếu thiếu khoá ho
 
 test("loadLlmScorerConfig: mặc định, bỏ dấu / cuối base URL, giá trị sai rơi về mặc định, không có model mặc định", () => {
   const defaults = loadLlmScorerConfig({});
-  assert.equal(defaults.baseUrl, "https://openrouter.ai/api/v1");
+  assert.equal(defaults.baseUrl, "https://generativelanguage.googleapis.com/v1beta/openai");
   assert.equal(defaults.apiKey, "");
   assert.equal(defaults.model, "");
   assert.equal(defaults.timeoutMs, 25000);
@@ -503,8 +503,8 @@ test("loadLlmScorerConfig: mặc định, bỏ dấu / cuối base URL, giá tr�
   assert.equal(defaults.maxCandidateChars, 4000);
 
   const custom = loadLlmScorerConfig({
-    OPENROUTER_BASE_URL: "https://proxy.example.com/api/v1///",
-    OPENROUTER_API_KEY: "k",
+    GEMINI_BASE_URL: "https://proxy.example.com/api/v1///",
+    GEMINI_API_KEY: "k",
     LLM_SCORER_MODEL: "vendor/model",
     LLM_SCORER_TIMEOUT_MS: "7000",
     LLM_SCORER_BATCH_SIZE: "5",
@@ -528,6 +528,98 @@ test("loadLlmScorerConfig: mặc định, bỏ dấu / cuối base URL, giá tr�
   assert.equal(bad.batchSize, 5);
   assert.equal(bad.concurrency, 20);
   assert.equal(bad.maxCandidateChars, 4000);
+});
+
+test("loadLlmScorerConfig: LLM_SCORER_BASE_URL / LLM_SCORER_API_KEY ghi đè GEMINI_*, không đặt thì dùng chung", () => {
+  const shared = loadLlmScorerConfig({ GEMINI_BASE_URL: "https://or.example/api/v1", GEMINI_API_KEY: "or-key" });
+  assert.equal(shared.baseUrl, "https://or.example/api/v1");
+  assert.equal(shared.apiKey, "or-key");
+
+  const split = loadLlmScorerConfig({
+    GEMINI_BASE_URL: "https://or.example/api/v1",
+    GEMINI_API_KEY: "or-key",
+    LLM_SCORER_BASE_URL: "https://generativelanguage.googleapis.com/v1beta/openai/",
+    LLM_SCORER_API_KEY: "gemini-key",
+  });
+  assert.equal(split.baseUrl, "https://generativelanguage.googleapis.com/v1beta/openai");
+  assert.equal(split.apiKey, "gemini-key");
+
+  // Chỉ khoá riêng (cùng provider, khoá khác): base URL vẫn lấy từ GEMINI_BASE_URL.
+  const keyOnly = loadLlmScorerConfig({ GEMINI_BASE_URL: "https://or.example/api/v1", LLM_SCORER_API_KEY: "scorer-key" });
+  assert.equal(keyOnly.baseUrl, "https://or.example/api/v1");
+  assert.equal(keyOnly.apiKey, "scorer-key");
+});
+
+test("OPENROUTER_* không còn được đọc: chỉ có khoá/base URL cũ thì scorer vẫn NOT_CONFIGURED", () => {
+  const env = {
+    OPENROUTER_API_KEY: "old-key",
+    OPENROUTER_BASE_URL: "https://openrouter.ai/api/v1",
+    LLM_SCORER_MODEL: "gemini-2.5-flash",
+  };
+  const loaded = loadLlmScorerConfig(env);
+  assert.equal(loaded.apiKey, "");
+  assert.equal(loaded.baseUrl, "https://generativelanguage.googleapis.com/v1beta/openai");
+  assert.throws(
+    () => createScorerFromEnv(env),
+    (error: unknown) =>
+      error instanceof LlmScorerError &&
+      error.code === "NOT_CONFIGURED" &&
+      /GEMINI_API_KEY/.test(error.message) &&
+      !error.message.includes("old-key"),
+  );
+});
+
+test("đổi LLM_SCORER_BASE_URL mà thiếu LLM_SCORER_API_KEY thì KHÔNG dùng GEMINI_API_KEY (không gửi khoá chung cho host khác)", () => {
+  const env = {
+    GEMINI_API_KEY: "or-key",
+    LLM_SCORER_BASE_URL: "https://generativelanguage.googleapis.com/v1beta/openai",
+    LLM_SCORER_MODEL: "gemini-2.5-flash",
+  };
+  assert.equal(loadLlmScorerConfig(env).apiKey, "");
+  assert.throws(
+    () => createScorerFromEnv(env),
+    (error: unknown) => error instanceof LlmScorerError && error.code === "NOT_CONFIGURED",
+  );
+});
+
+test("loadLlmScorerConfig: reasoningEffort chỉ có khi đặt, được cắt khoảng trắng và đưa về chữ thường", () => {
+  assert.equal("reasoningEffort" in loadLlmScorerConfig({}), false);
+  assert.equal("reasoningEffort" in loadLlmScorerConfig({ LLM_SCORER_REASONING_EFFORT: "  " }), false);
+  assert.equal(loadLlmScorerConfig({ LLM_SCORER_REASONING_EFFORT: " None " }).reasoningEffort, "none");
+});
+
+test("createLlmScorer: LLM_SCORER_REASONING_EFFORT sai giá trị là NOT_CONFIGURED, giá trị hợp lệ thì dựng được", () => {
+  for (const value of ["nonee", "off", "0", "extreme"]) {
+    assert.throws(
+      () => createLlmScorer(config("http://127.0.0.1:1", { reasoningEffort: value })),
+      (error: unknown) =>
+        error instanceof LlmScorerError &&
+        error.code === "NOT_CONFIGURED" &&
+        /LLM_SCORER_REASONING_EFFORT/.test(error.message),
+      value,
+    );
+  }
+  for (const value of ["none", "minimal", "low", "medium", "high"]) {
+    assert.doesNotThrow(() => createLlmScorer(config("http://127.0.0.1:1", { reasoningEffort: value })), value);
+  }
+});
+
+test("reasoning_effort chỉ được gửi khi có cấu hình; không đặt thì body không có field này", async () => {
+  const server = await startFakeServer((request) => scoreAll(request));
+  try {
+    await scoreCandidatesWithLlm(input, candidates(1), config(server.origin), farFuture());
+    await scoreCandidatesWithLlm(
+      input,
+      candidates(1),
+      config(server.origin, { reasoningEffort: "none" }),
+      farFuture(),
+    );
+
+    assert.equal("reasoning_effort" in server.requests[0]!.body, false);
+    assert.equal(server.requests[1]!.body.reasoning_effort, "none");
+  } finally {
+    await server.close();
+  }
 });
 
 test("createScorerFromEnv: chỉ LLM_MOCK_MODE=true mới dùng mock; không đặt thì cần cấu hình thật", async () => {
@@ -559,7 +651,7 @@ test("mock scorer chấm theo độ trùng từ vựng và trả một mục cho
   assert.ok((byId.get("gan") ?? 0) > (byId.get("xa") ?? 100));
 });
 
-test("luôn đặt max_tokens theo kích thước batch (không có thì OpenRouter tính trước 65536 token và trả 402 khi số dư thấp)", async () => {
+test("luôn đặt max_tokens theo kích thước batch (không có thì provider tính trước theo mức tối đa của model, OpenRouter từng trả 402 khi số dư thấp)", async () => {
   const server = await startFakeServer((request) => scoreAll(request));
   try {
     await scoreCandidatesWithLlm(
@@ -589,6 +681,27 @@ test("output bị cắt (finish_reason=length) là BAD_OUTPUT có thông báo n�
       () => scoreCandidatesWithLlm(input, candidates(1), config(server.origin), farFuture()),
       (error: unknown) =>
         error instanceof LlmScorerError && error.code === "BAD_OUTPUT" && /max_tokens/.test(error.message),
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("HTTP 429 (hết hạn mức free tier) là RATE_LIMITED, không phải NETWORK_ERROR, không lộ body hay khoá", async () => {
+  const server = await startFakeServer(() => ({
+    status: 429,
+    json: { error: { message: `Quota exceeded for ${API_KEY}`, status: "RESOURCE_EXHAUSTED" } },
+  }));
+  try {
+    await assert.rejects(
+      () => scoreCandidatesWithLlm(input, candidates(1), config(server.origin), farFuture()),
+      (error: unknown) => {
+        assert.ok(error instanceof LlmScorerError);
+        assert.equal(error.code, "RATE_LIMITED");
+        assert.match(error.message, /HTTP 429/);
+        assert.doesNotMatch(error.message, new RegExp(API_KEY));
+        return true;
+      },
     );
   } finally {
     await server.close();
