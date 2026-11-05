@@ -15,7 +15,7 @@ const API_KEY = "sk-or-test-secret-key";
 
 function configFor(origin: string, overrides: Partial<EmbeddingConfig> = {}): EmbeddingConfig {
   return {
-    baseUrl: `${origin}/api/v1`,
+    baseUrl: `${origin}/v1beta`,
     apiKey: API_KEY,
     model: "gemini-embedding-001",
     dimensions: DIMS,
@@ -26,44 +26,77 @@ function configFor(origin: string, overrides: Partial<EmbeddingConfig> = {}): Em
 }
 
 function vectorFor(seed: number): number[] {
-  return [seed, seed + 0.5, seed + 1, seed + 1.5];
+  return [seed + 1, seed + 1.5, seed + 2, seed + 2.5];
 }
 
-function okBody(count: number, order: number[] = [...Array(count).keys()]) {
+/** Client tự chuẩn hoá L2 (Gemini không chuẩn hoá khi cắt khỏi 3072 chiều). */
+function unit(values: number[]): number[] {
+  const norm = Math.sqrt(values.reduce((sum, value) => sum + value * value, 0));
+  return values.map((value) => value / norm);
+}
+
+/** Response `batchEmbedContents`: `embeddings[i].values`, đúng thứ tự request, không có `index`. */
+function okBody(count: number) {
   return {
-    object: "list",
-    model: "gemini-embedding-001",
-    data: order.map((index) => ({
-      object: "embedding",
-      index,
-      embedding: vectorFor(index),
-    })),
+    embeddings: [...Array(count).keys()].map((index) => ({ values: vectorFor(index) })),
+    usageMetadata: { promptTokenCount: count },
   };
 }
 
-test("gửi đúng endpoint, header, model và trả vector theo thứ tự đầu vào", async () => {
+test("gọi :batchEmbedContents với khoá ở header x-goog-api-key và trả vector theo thứ tự đầu vào", async () => {
   const server = await startFakeServer((request) => ({
     status: 200,
-    // Trả đảo thứ tự để chắc chắn client sắp xếp lại theo `index`.
-    json: okBody(request.body.input.length, [2, 0, 1]),
+    json: okBody(request.body.requests.length),
   }));
   try {
     const embed = createHttpEmbedder(configFor(server.origin));
     const vectors = await embed(["a", "b", "c"]);
 
-    assert.deepEqual(vectors, [vectorFor(0), vectorFor(1), vectorFor(2)]);
+    assert.deepEqual(vectors, [0, 1, 2].map((seed) => unit(vectorFor(seed))));
     const [request] = server.requests;
     assert.equal(request!.method, "POST");
-    assert.equal(request!.url, "/api/v1/embeddings");
-    assert.equal(request!.headers.authorization, `Bearer ${API_KEY}`);
-    // `dimensions` luôn được gửi: gemini-embedding-001 mặc định ra 3072 chiều, còn collection
-    // Qdrant là 1536 (xem DEFAULT_EMBEDDING_DIMENSIONS).
+    assert.equal(request!.url, "/v1beta/models/gemini-embedding-001:batchEmbedContents");
+    assert.equal(request!.headers["x-goog-api-key"], API_KEY);
+    // Khoá KHÔNG đi qua Authorization hay query string (query string dễ lọt vào log).
+    assert.equal(request!.headers.authorization, undefined);
+    assert.doesNotMatch(request!.url, /key=|test-secret/);
+    // `outputDimensionality` (trong embedContentConfig) luôn được gửi: gemini-embedding-001 mặc
+    // định ra 3072 chiều, còn collection Qdrant là 1536 (xem DEFAULT_EMBEDDING_DIMENSIONS).
     assert.deepEqual(request!.body, {
-      model: "gemini-embedding-001",
-      input: ["a", "b", "c"],
-      encoding_format: "float",
-      dimensions: DIMS,
+      requests: ["a", "b", "c"].map((text) => ({
+        model: "models/gemini-embedding-001",
+        content: { parts: [{ text }] },
+        embedContentConfig: { outputDimensionality: DIMS },
+      })),
     });
+  } finally {
+    await server.close();
+  }
+});
+
+test("tên model có tiền tố models/ vẫn gọi đúng đường dẫn", async () => {
+  const server = await startFakeServer((request) => ({
+    status: 200,
+    json: okBody(request.body.requests.length),
+  }));
+  try {
+    await createHttpEmbedder(configFor(server.origin, { model: "models/gemini-embedding-001" }))(["a"]);
+    assert.equal(server.requests[0]!.url, "/v1beta/models/gemini-embedding-001:batchEmbedContents");
+    assert.equal(server.requests[0]!.body.requests[0].model, "models/gemini-embedding-001");
+  } finally {
+    await server.close();
+  }
+});
+
+test("vector trả về được chuẩn hoá L2; vector không giữ nguyên (không sinh NaN)", async () => {
+  const server = await startFakeServer(() => ({
+    status: 200,
+    json: { embeddings: [{ values: [3, 0, 4, 0] }, { values: [0, 0, 0, 0] }] },
+  }));
+  try {
+    const [first, zero] = await createHttpEmbedder(configFor(server.origin))(["a", "b"]);
+    assert.deepEqual(first, [0.6, 0, 0.8, 0]);
+    assert.deepEqual(zero, [0, 0, 0, 0]);
   } finally {
     await server.close();
   }
@@ -73,9 +106,8 @@ test("chia batch theo batchSize và ghép kết quả đúng thứ tự", async 
   const server = await startFakeServer((request) => ({
     status: 200,
     json: {
-      data: request.body.input.map((text: string, index: number) => ({
-        index,
-        embedding: vectorFor(Number(text)),
+      embeddings: request.body.requests.map((item: any) => ({
+        values: vectorFor(Number(item.content.parts[0].text)),
       })),
     },
   }));
@@ -85,10 +117,10 @@ test("chia batch theo batchSize và ghép kết quả đúng thứ tự", async 
 
     assert.equal(server.requests.length, 3);
     assert.deepEqual(
-      server.requests.map((request) => request.body.input),
+      server.requests.map((request) => request.body.requests.map((item: any) => item.content.parts[0].text)),
       [["0", "1"], ["2", "3"], ["4"]],
     );
-    assert.deepEqual(vectors, [0, 1, 2, 3, 4].map(vectorFor));
+    assert.deepEqual(vectors, [0, 1, 2, 3, 4].map((seed) => unit(vectorFor(seed))));
   } finally {
     await server.close();
   }
@@ -122,9 +154,15 @@ test("văn bản rỗng bị từ chối trước khi gọi mạng", async () =>
 test("response sai số chiều hoặc sai số lượng bị coi là BAD_RESPONSE", async () => {
   const wrongDimension = await startFakeServer(() => ({
     status: 200,
-    json: { data: [{ index: 0, embedding: [1, 2] }] },
+    json: { embeddings: [{ values: [1, 2] }] },
   }));
   const wrongCount = await startFakeServer(() => ({ status: 200, json: okBody(1) }));
+  // Dạng response của endpoint tương thích OpenAI (`data[].embedding`) không còn được chấp nhận.
+  const openAiShape = await startFakeServer(() => ({
+    status: 200,
+    json: { data: [{ index: 0, embedding: vectorFor(0) }] },
+  }));
+  const noValues = await startFakeServer(() => ({ status: 200, json: { embeddings: [{}] } }));
   try {
     await assert.rejects(
       () => createHttpEmbedder(configFor(wrongDimension.origin))(["a"]),
@@ -134,9 +172,20 @@ test("response sai số chiều hoặc sai số lượng bị coi là BAD_RESPON
       () => createHttpEmbedder(configFor(wrongCount.origin))(["a", "b"]),
       (error: unknown) => error instanceof EmbeddingError && error.code === "BAD_RESPONSE",
     );
+    await assert.rejects(
+      () => createHttpEmbedder(configFor(openAiShape.origin))(["a"]),
+      (error: unknown) =>
+        error instanceof EmbeddingError && error.code === "BAD_RESPONSE" && /embeddings/.test(error.message),
+    );
+    await assert.rejects(
+      () => createHttpEmbedder(configFor(noValues.origin))(["a"]),
+      (error: unknown) => error instanceof EmbeddingError && error.code === "BAD_RESPONSE" && /values/.test(error.message),
+    );
   } finally {
     await wrongDimension.close();
     await wrongCount.close();
+    await openAiShape.close();
+    await noValues.close();
   }
 });
 
@@ -220,14 +269,17 @@ test("OPENROUTER_API_KEY không còn được đọc: chỉ có khoá cũ thì v
 
 test("loadEmbeddingConfig dùng mặc định Gemini (1536 chiều khớp collection Qdrant hiện có)", () => {
   const config = loadEmbeddingConfig({ GEMINI_API_KEY: "k" });
-  assert.equal(config.baseUrl, "https://generativelanguage.googleapis.com/v1beta/openai");
+  // API gốc của Gemini, KHÔNG phải endpoint tương thích OpenAI (/v1beta/openai) mà scorer dùng.
+  assert.equal(config.baseUrl, "https://generativelanguage.googleapis.com/v1beta");
   assert.equal(config.apiKey, "k");
   assert.equal(config.model, "gemini-embedding-001");
   assert.equal(config.dimensions, 1536);
   assert.equal(config.batchSize, 64);
 
-  const custom = loadEmbeddingConfig({ GEMINI_BASE_URL: "https://proxy.example.com/v1beta/openai//", GEMINI_API_KEY: "k" });
-  assert.equal(custom.baseUrl, "https://proxy.example.com/v1beta/openai");
+  const custom = loadEmbeddingConfig({ EMBEDDING_BASE_URL: "https://proxy.example.com/v1beta//", GEMINI_API_KEY: "k" });
+  assert.equal(custom.baseUrl, "https://proxy.example.com/v1beta");
+  // GEMINI_BASE_URL không còn tồn tại: không ảnh hưởng embedding.
+  assert.equal(loadEmbeddingConfig({ GEMINI_BASE_URL: "https://x.example/openai", GEMINI_API_KEY: "k" }).baseUrl, config.baseUrl);
 });
 
 test("embedder giả: xác định, chuẩn hoá L2, văn bản giống nhau thì gần nhau hơn", async () => {

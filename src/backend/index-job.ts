@@ -156,6 +156,9 @@ export function createIndexJobHandler(
       log("error", "index_job_failed", {
         ...base,
         errorCode: (error as { code?: string }).code ?? "UNKNOWN",
+        // message không bao giờ chứa nội dung sáng kiến hay API key (xem embeddings.ts,
+        // qdrant-store.ts); cần để phân biệt các nguyên nhân BAD_RESPONSE khác nhau.
+        errorMessage: error instanceof Error ? error.message : String(error),
         outcome: outcome.status,
         durationMs: Math.round(performance.now() - startedAt),
       });

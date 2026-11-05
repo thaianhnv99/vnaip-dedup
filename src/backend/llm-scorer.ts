@@ -5,15 +5,20 @@ import type {
   RawModelMatch,
   ScoreOptions,
 } from "./dedup.js";
-import { DEFAULT_GEMINI_BASE_URL } from "./embeddings.js";
+/**
+ * Endpoint tương thích OpenAI của Gemini (chat completions). Khác với embedding, vốn dùng
+ * API gốc của Gemini (`DEFAULT_EMBEDDING_BASE_URL` ở embeddings.ts).
+ */
+export const DEFAULT_SCORER_BASE_URL =
+  "https://generativelanguage.googleapis.com/v1beta/openai";
 
 /**
  * Chấm độ tương đồng giữa input và từng ứng viên bằng model chat qua endpoint tương
  * thích OpenAI của Gemini (`POST {baseUrl}/chat/completions`, `Authorization: Bearer
- * <khoá>`). Mặc định dùng chung khoá và base URL với embedding (`GEMINI_API_KEY`,
- * `GEMINI_BASE_URL`); đặt `LLM_SCORER_BASE_URL` / `LLM_SCORER_API_KEY` để chỉ scorer đi
- * qua khoá/endpoint khác. Free tier tính hạn mức theo PROJECT chứ không theo khoá, nên
- * muốn tách hạn mức của scorer khỏi worker embedding thì dùng khoá của project khác.
+ * <khoá>`). Mặc định dùng chung khoá `GEMINI_API_KEY` với embedding; đặt
+ * `LLM_SCORER_BASE_URL` / `LLM_SCORER_API_KEY` để chỉ scorer đi qua khoá/endpoint khác.
+ * Free tier tính hạn mức theo PROJECT chứ không theo khoá, nên muốn tách hạn mức của
+ * scorer khỏi worker embedding thì dùng khoá của project khác.
  *
  * Nội dung hồ sơ (title/content) được đưa vào model như DỮ LIỆU, không phải chỉ
  * dẫn: prompt nói rõ nội dung có thể chứa văn bản độc hại và không được tuân theo.
@@ -92,11 +97,10 @@ export function loadLlmScorerConfig(
 ): LlmScorerConfig {
   const reasoningEffort = env.LLM_SCORER_REASONING_EFFORT?.trim().toLowerCase();
   return {
-    // LLM_SCORER_* chỉ áp dụng cho scorer; không đặt thì dùng chung với embedding.
+    // Base URL của scorer (OpenAI-compat) khác của embedding (API gốc), nên không dùng chung.
     baseUrl: (
       env.LLM_SCORER_BASE_URL ||
-      env.GEMINI_BASE_URL ||
-      DEFAULT_GEMINI_BASE_URL
+      DEFAULT_SCORER_BASE_URL
     ).replace(/\/+$/, ""),
     // Đã đổi base URL riêng cho scorer thì BẮT BUỘC có khoá riêng: không được rơi về
     // GEMINI_API_KEY, vì như vậy sẽ gửi khoá này tới host của endpoint khác.

@@ -503,8 +503,8 @@ test("loadLlmScorerConfig: mặc định, bỏ dấu / cuối base URL, giá tr�
   assert.equal(defaults.maxCandidateChars, 4000);
 
   const custom = loadLlmScorerConfig({
-    GEMINI_BASE_URL: "https://proxy.example.com/api/v1///",
-    GEMINI_API_KEY: "k",
+    LLM_SCORER_BASE_URL: "https://proxy.example.com/api/v1///",
+    LLM_SCORER_API_KEY: "k",
     LLM_SCORER_MODEL: "vendor/model",
     LLM_SCORER_TIMEOUT_MS: "7000",
     LLM_SCORER_BATCH_SIZE: "5",
@@ -530,24 +530,30 @@ test("loadLlmScorerConfig: mặc định, bỏ dấu / cuối base URL, giá tr�
   assert.equal(bad.maxCandidateChars, 4000);
 });
 
-test("loadLlmScorerConfig: LLM_SCORER_BASE_URL / LLM_SCORER_API_KEY ghi đè GEMINI_*, không đặt thì dùng chung", () => {
-  const shared = loadLlmScorerConfig({ GEMINI_BASE_URL: "https://or.example/api/v1", GEMINI_API_KEY: "or-key" });
-  assert.equal(shared.baseUrl, "https://or.example/api/v1");
-  assert.equal(shared.apiKey, "or-key");
+test("loadLlmScorerConfig: GEMINI_API_KEY dùng chung; LLM_SCORER_BASE_URL / LLM_SCORER_API_KEY ghi đè riêng cho scorer", () => {
+  const shared = loadLlmScorerConfig({ GEMINI_API_KEY: "shared-key" });
+  // Endpoint tương thích OpenAI (chat completions); embedding dùng API gốc ở base URL khác.
+  assert.equal(shared.baseUrl, "https://generativelanguage.googleapis.com/v1beta/openai");
+  assert.equal(shared.apiKey, "shared-key");
 
   const split = loadLlmScorerConfig({
-    GEMINI_BASE_URL: "https://or.example/api/v1",
-    GEMINI_API_KEY: "or-key",
-    LLM_SCORER_BASE_URL: "https://generativelanguage.googleapis.com/v1beta/openai/",
-    LLM_SCORER_API_KEY: "gemini-key",
+    GEMINI_API_KEY: "shared-key",
+    LLM_SCORER_BASE_URL: "https://proxy.example.com/v1beta/openai/",
+    LLM_SCORER_API_KEY: "scorer-key",
   });
-  assert.equal(split.baseUrl, "https://generativelanguage.googleapis.com/v1beta/openai");
-  assert.equal(split.apiKey, "gemini-key");
+  assert.equal(split.baseUrl, "https://proxy.example.com/v1beta/openai");
+  assert.equal(split.apiKey, "scorer-key");
 
-  // Chỉ khoá riêng (cùng provider, khoá khác): base URL vẫn lấy từ GEMINI_BASE_URL.
-  const keyOnly = loadLlmScorerConfig({ GEMINI_BASE_URL: "https://or.example/api/v1", LLM_SCORER_API_KEY: "scorer-key" });
-  assert.equal(keyOnly.baseUrl, "https://or.example/api/v1");
+  // Chỉ khoá riêng (project khác, hạn mức riêng): base URL vẫn là mặc định.
+  const keyOnly = loadLlmScorerConfig({ GEMINI_API_KEY: "shared-key", LLM_SCORER_API_KEY: "scorer-key" });
+  assert.equal(keyOnly.baseUrl, "https://generativelanguage.googleapis.com/v1beta/openai");
   assert.equal(keyOnly.apiKey, "scorer-key");
+
+  // GEMINI_BASE_URL không còn tồn tại (embedding và scorer dùng hai base URL khác nhau).
+  assert.equal(
+    loadLlmScorerConfig({ GEMINI_API_KEY: "k", GEMINI_BASE_URL: "https://x.example/v1beta" }).baseUrl,
+    "https://generativelanguage.googleapis.com/v1beta/openai",
+  );
 });
 
 test("OPENROUTER_* không còn được đọc: chỉ có khoá/base URL cũ thì scorer vẫn NOT_CONFIGURED", () => {

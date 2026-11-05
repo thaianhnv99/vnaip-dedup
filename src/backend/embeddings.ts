@@ -1,10 +1,17 @@
 import { createHash } from "node:crypto";
 
 /**
- * Embedding client qua Gemini: POST {baseUrl}/embeddings (endpoint tương thích
- * OpenAI của Gemini API). Model mặc định gemini-embedding-001 mặc định ra 3072
- * chiều nhưng cắt được về 128..3072 (khuyến nghị 768, 1536, 3072), nên request
- * luôn gửi `dimensions` để ra đúng 1536 chiều, khớp collection Qdrant đã tạo.
+ * Embedding client qua API gốc của Gemini:
+ * POST {baseUrl}/models/{model}:batchEmbedContents (cùng schema với `:embedContent`
+ * nhưng nhận nhiều văn bản trong một request, tiết kiệm hạn mức request của free tier).
+ * Khoá API đi qua header `x-goog-api-key`.
+ *
+ * gemini-embedding-001 mặc định ra 3072 chiều nhưng cắt được về 128..3072 (khuyến nghị 768,
+ * 1536, 3072) bằng `embedContentConfig.outputDimensionality`, nên request luôn gửi giá trị
+ * này để ra đúng 1536 chiều, khớp collection Qdrant đã tạo. Tài liệu Gemini nói model này
+ * KHÔNG tự chuẩn hoá khi cắt khác 3072, nên client tự chuẩn hoá L2 (gemini-embedding-2 đã
+ * chuẩn hoá sẵn; chuẩn hoá lại không đổi gì đáng kể).
+ *
  * Model dùng khi query PHẢI trùng model dùng khi index, nên model được ghi vào
  * payload của từng point (xem vector-store.ts).
  *
@@ -13,8 +20,9 @@ import { createHash } from "node:crypto";
  * key, nội dung văn bản gửi đi hay body phản hồi của provider.
  */
 
-export const DEFAULT_GEMINI_BASE_URL =
-  "https://generativelanguage.googleapis.com/v1beta/openai";
+/** Base URL API gốc của Gemini (không phải endpoint tương thích OpenAI mà scorer dùng). */
+export const DEFAULT_EMBEDDING_BASE_URL =
+  "https://generativelanguage.googleapis.com/v1beta";
 export const DEFAULT_EMBEDDING_MODEL = "gemini-embedding-001";
 export const DEFAULT_EMBEDDING_DIMENSIONS = 1536;
 
@@ -75,7 +83,7 @@ export function loadEmbeddingConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): EmbeddingConfig {
   return {
-    baseUrl: (env.GEMINI_BASE_URL || DEFAULT_GEMINI_BASE_URL).replace(
+    baseUrl: (env.EMBEDDING_BASE_URL || DEFAULT_EMBEDDING_BASE_URL).replace(
       /\/+$/,
       "",
     ),
@@ -128,22 +136,28 @@ async function embedBatch(
   batch: string[],
   config: EmbeddingConfig,
 ): Promise<number[][]> {
+  // Chấp nhận cả "gemini-embedding-001" lẫn "models/gemini-embedding-001".
+  const modelId = config.model.replace(/^models\//, "");
   let response: Response;
   try {
-    response = await fetch(`${config.baseUrl}/embeddings`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${config.apiKey}`,
+    response = await fetch(
+      `${config.baseUrl}/models/${encodeURIComponent(modelId)}:batchEmbedContents`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-goog-api-key": config.apiKey,
+        },
+        body: JSON.stringify({
+          requests: batch.map((text) => ({
+            model: `models/${modelId}`,
+            content: { parts: [{ text }] },
+            embedContentConfig: { outputDimensionality: config.dimensions },
+          })),
+        }),
+        signal: AbortSignal.timeout(config.timeoutMs),
       },
-      body: JSON.stringify({
-        model: config.model,
-        input: batch,
-        encoding_format: "float",
-        dimensions: config.dimensions,
-      }),
-      signal: AbortSignal.timeout(config.timeoutMs),
-    });
+    );
   } catch (error) {
     throw transportError(error);
   }
@@ -154,14 +168,28 @@ async function embedBatch(
     throw statusError(response.status);
   }
 
-  let body: unknown;
+  let rawText: string;
   try {
-    body = await response.json();
+    rawText = await response.text();
   } catch (error) {
     if (isTimeout(error)) throw transportError(error);
     throw new EmbeddingError(
       "BAD_RESPONSE",
-      "Gemini trả response không phải JSON hợp lệ",
+      "Gemini trả response không đọc được (lỗi khi đọc body)",
+      { cause: error },
+    );
+  }
+
+  let body: unknown;
+  try {
+    body = JSON.parse(rawText);
+  } catch (error) {
+    throw new EmbeddingError(
+      "BAD_RESPONSE",
+      // Không log rawText (có thể phản chiếu nội dung gửi đi nếu provider echo lỗi);
+      // chỉ log độ dài và vài ký tự đầu (thường là mã lỗi/html, không phải nội dung
+      // sáng kiến) để phân biệt "rỗng", "HTML lỗi", "JSON cắt cụt", v.v.
+      `Gemini trả response không phải JSON hợp lệ (length=${rawText.length}, prefix=${JSON.stringify(rawText.slice(0, 40))})`,
       { cause: error },
     );
   }
@@ -169,47 +197,65 @@ async function embedBatch(
   return parseEmbeddings(body, batch.length, config.dimensions);
 }
 
+/**
+ * Response `batchEmbedContents`: `{ embeddings: [{ values: number[] }, ...] }`, theo ĐÚNG thứ tự
+ * request (không có `index`), nên số phần tử phải khớp số văn bản đã gửi.
+ */
 function parseEmbeddings(
   body: unknown,
   expectedCount: number,
   dimensions: number,
 ): number[][] {
-  if (
-    !isRecord(body) ||
-    !Array.isArray(body.data) ||
-    body.data.length !== expectedCount
-  ) {
+  if (!isRecord(body) || !Array.isArray(body.embeddings)) {
     throw new EmbeddingError(
       "BAD_RESPONSE",
-      "Gemini trả số embedding không khớp số văn bản đã gửi",
+      `Gemini trả response thiếu field "embeddings" dạng mảng (kiểu nhận được: ${
+        isRecord(body) ? Object.keys(body).join(",") || "object rỗng" : typeof body
+      })`,
+    );
+  }
+  if (body.embeddings.length !== expectedCount) {
+    throw new EmbeddingError(
+      "BAD_RESPONSE",
+      `Gemini trả số embedding không khớp số văn bản đã gửi (gửi ${expectedCount}, nhận ${body.embeddings.length})`,
     );
   }
 
-  const ordered: Array<number[] | undefined> = new Array(expectedCount).fill(
-    undefined,
-  );
-  for (const item of body.data) {
+  return body.embeddings.map((item: unknown, index: number) => {
+    if (!isRecord(item) || !Array.isArray(item.values)) {
+      throw new EmbeddingError(
+        "BAD_RESPONSE",
+        `Gemini trả một embedding không có "values" dạng mảng (index=${index}, kiểu: ${
+          isRecord(item) ? Object.keys(item).join(",") || "object rỗng" : typeof item
+        })`,
+      );
+    }
+    if (item.values.length !== dimensions) {
+      throw new EmbeddingError(
+        "BAD_RESPONSE",
+        `Gemini trả embedding sai số chiều (index=${index}, kỳ vọng ${dimensions}, nhận ${item.values.length})`,
+      );
+    }
     if (
-      !isRecord(item) ||
-      !Number.isInteger(item.index) ||
-      (item.index as number) < 0 ||
-      (item.index as number) >= expectedCount ||
-      ordered[item.index as number] !== undefined ||
-      !Array.isArray(item.embedding) ||
-      item.embedding.length !== dimensions ||
-      !item.embedding.every(
+      !item.values.every(
         (value: unknown) => typeof value === "number" && Number.isFinite(value),
       )
     ) {
       throw new EmbeddingError(
         "BAD_RESPONSE",
-        `Gemini trả embedding sai định dạng hoặc sai số chiều (kỳ vọng ${dimensions})`,
+        `Gemini trả embedding chứa giá trị không phải số hữu hạn (index=${index})`,
       );
     }
-    ordered[item.index as number] = item.embedding as number[];
-  }
+    return normalizeL2(item.values as number[]);
+  });
+}
 
-  return ordered as number[][];
+/** Chuẩn hoá về độ dài 1; vector không (norm 0) giữ nguyên để không sinh NaN. */
+function normalizeL2(values: number[]): number[] {
+  let sumOfSquares = 0;
+  for (const value of values) sumOfSquares += value * value;
+  const norm = Math.sqrt(sumOfSquares);
+  return norm > 0 ? values.map((value) => value / norm) : values;
 }
 
 function statusError(status: number): EmbeddingError {

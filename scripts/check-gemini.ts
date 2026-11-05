@@ -4,8 +4,9 @@
  *
  * Kiểm ba thứ mà tài liệu Gemini không nói rõ:
  *   1. Chat có nhận `response_format: json_object`, `max_tokens` và `reasoning_effort` không.
- *   2. Endpoint /embeddings có nhận `dimensions` (ra 1536 chiều khớp Qdrant) không; nếu không
- *      thì in số chiều mặc định thực tế.
+ *   2. Endpoint gốc `models/{model}:embedContent` có nhận `outputDimensionality` (ra 1536 chiều
+ *      khớp Qdrant) không, và nhận ở đâu: trong `embedContentConfig` (theo tài liệu hiện hành) hay
+ *      ở cấp trên cùng (schema cũ). Client production gửi theo cách thứ nhất.
  *   3. (tuỳ chọn) `--burst=N`: bắn N request chat song song để xem bao nhiêu bị 429, từ đó chọn
  *      LLM_SCORER_CONCURRENCY / LLM_SCORER_BATCH_SIZE cho free tier. Mỗi request tốn quota.
  *
@@ -53,18 +54,18 @@ async function googleErrorStatus(response: Response): Promise<string> {
 }
 
 async function listModels(baseUrl: string, apiKey: string) {
-  console.log('\n[1] Danh sách model');
-  const response = await fetch(`${baseUrl}/models`, {
-    headers: { authorization: `Bearer ${apiKey}` },
+  console.log('\n[1] Danh sách model (API gốc)');
+  const response = await fetch(`${baseUrl}/models?pageSize=1000`, {
+    headers: { 'x-goog-api-key': apiKey },
     signal: AbortSignal.timeout(15000),
   }).catch(() => undefined);
   if (!response) return fail('không kết nối được tới Gemini');
   if (!response.ok) {
     return fail(`HTTP ${response.status}${await googleErrorStatus(response)} (khoá sai hoặc chưa bật Gemini API?)`);
   }
-  const body = (await response.json().catch(() => null)) as { data?: Array<{ id?: unknown }> } | null;
-  const ids = (body?.data ?? [])
-    .map((item) => (typeof item.id === 'string' ? item.id.replace(/^models\//, '') : ''))
+  const body = (await response.json().catch(() => null)) as { models?: Array<{ name?: unknown }> } | null;
+  const ids = (body?.models ?? [])
+    .map((item) => (typeof item.name === 'string' ? item.name.replace(/^models\//, '') : ''))
     .filter((id) => /flash|embedding/i.test(id));
   ok(`khoá hợp lệ; model flash/embedding thấy được: ${ids.slice(0, 40).join(', ') || '(không có)'}`);
 }
@@ -104,42 +105,41 @@ async function checkScorer() {
 }
 
 async function checkEmbedding() {
-  console.log('\n[3] Embedding');
+  console.log('\n[3] Embedding (API gốc, :embedContent / :batchEmbedContents)');
   const config = loadEmbeddingConfig(process.env);
-  console.log(`  model=${config.model} dimensions=${config.dimensions}`);
+  console.log(`  base=${config.baseUrl} model=${config.model} dimensions=${config.dimensions}`);
   if (!config.apiKey) return fail('thiếu GEMINI_API_KEY');
 
-  const probe = async (withDimensions: boolean) => {
-    const response = await fetch(`${config.baseUrl}/embeddings`, {
+  const modelId = config.model.replace(/^models\//, '');
+  const probe = async (extra: Record<string, unknown>) => {
+    const response = await fetch(`${config.baseUrl}/models/${encodeURIComponent(modelId)}:embedContent`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${config.apiKey}` },
-      body: JSON.stringify({
-        model: config.model,
-        input: ['câu thử'],
-        encoding_format: 'float',
-        ...(withDimensions ? { dimensions: config.dimensions } : {}),
-      }),
+      headers: { 'content-type': 'application/json', 'x-goog-api-key': config.apiKey },
+      body: JSON.stringify({ model: `models/${modelId}`, content: { parts: [{ text: 'câu thử' }] }, ...extra }),
       signal: AbortSignal.timeout(15000),
     }).catch(() => undefined);
     if (!response) return 'không kết nối được';
     if (!response.ok) return `HTTP ${response.status}${await googleErrorStatus(response)}`;
-    const body = (await response.json().catch(() => null)) as { data?: Array<{ embedding?: unknown[] }> } | null;
-    const length = body?.data?.[0]?.embedding?.length;
-    return typeof length === 'number' ? `${length} chiều` : 'response không có embedding';
+    const body = (await response.json().catch(() => null)) as { embedding?: { values?: unknown[] } } | null;
+    const length = body?.embedding?.values?.length;
+    return typeof length === 'number' ? `${length} chiều` : 'response không có embedding.values';
   };
-  console.log(`  không gửi dimensions → ${await probe(false)} (mặc định của model)`);
-  console.log(`  gửi dimensions=${config.dimensions} → ${await probe(true)}`);
+  const d = config.dimensions;
+  console.log(`  không gửi số chiều                              → ${await probe({})} (mặc định của model)`);
+  console.log(`  embedContentConfig.outputDimensionality=${d}   → ${await probe({ embedContentConfig: { outputDimensionality: d } })}  <- cách client production dùng`);
+  console.log(`  outputDimensionality=${d} ở cấp trên cùng      → ${await probe({ outputDimensionality: d })}`);
 
   try {
     const vectors = await createHttpEmbedder(config)(['Ứng dụng báo cáo sự cố', 'Quy trình tuyển dụng']);
-    ok(`client production trả ${vectors.length} vector, mỗi vector ${vectors[0]!.length} chiều`);
+    const norm = Math.sqrt(vectors[0]!.reduce((sum, value) => sum + value * value, 0));
+    ok(`client production (:batchEmbedContents) trả ${vectors.length} vector, mỗi vector ${vectors[0]!.length} chiều, độ dài ${norm.toFixed(4)} (đã chuẩn hoá)`);
     if (config.dimensions !== DEFAULT_EMBEDDING_DIMENSIONS) {
       console.log(`    lưu ý: EMBEDDING_DIMENSIONS=${config.dimensions} khác ${DEFAULT_EMBEDDING_DIMENSIONS} của collection Qdrant hiện có; cần QDRANT_COLLECTION_PREFIX mới và index lại`);
     }
   } catch (error) {
     if (!(error instanceof EmbeddingError)) throw error;
     fail(`${error.code}: ${error.message}`);
-    console.log('    nếu dòng "gửi dimensions" không ra đúng số chiều: endpoint không nhận `dimensions`, cần đổi cách gọi (báo lại kết quả này).');
+    console.log('    nếu dòng "cách client production dùng" không ra đúng số chiều nhưng dòng "cấp trên cùng" thì ra đúng: API đang dùng schema cũ, báo lại kết quả này để đổi cách gọi.');
   }
 }
 

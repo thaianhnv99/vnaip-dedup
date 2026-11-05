@@ -134,7 +134,8 @@ Copy `.env.example` thành `.env` và chỉnh các biến. Tiến trình **web**
 | `CHECK_DUPLICATES_ALLOWED_SUBS`, `_OIDS`, `_WIDS` | Danh sách claim được phép gọi tool (phân tách bằng dấu phẩy, AND giữa các danh sách). Không đặt danh sách nào thì 403 cho tất cả. |
 | `CHECK_DUPLICATES_CANDIDATE_LIMIT` | Trần số sáng kiến gửi cho model (mặc định 100, tối đa 500). |
 | `CHECK_DUPLICATES_DEADLINE_MS` | Tổng thời gian cho cả lời gọi (mặc định 28000, nhỏ hơn `timeoutMs` 30000 của tool). |
-| `GEMINI_API_KEY`, `GEMINI_BASE_URL` | Khoá Gemini API và base URL endpoint tương thích OpenAI (mặc định `https://generativelanguage.googleapis.com/v1beta/openai`), dùng chung cho scorer và embedding. `OPENROUTER_*` không còn được đọc. |
+| `GEMINI_API_KEY` | Khoá Gemini API, dùng chung cho scorer và embedding. `OPENROUTER_*` và `GEMINI_BASE_URL` không còn được đọc. |
+| `EMBEDDING_BASE_URL` | Tuỳ chọn: base URL của embedding (mặc định `https://generativelanguage.googleapis.com/v1beta`, API gốc của Gemini). Khác base URL của scorer. |
 | `LLM_SCORER_BASE_URL`, `LLM_SCORER_API_KEY` | Tuỳ chọn: khoá/endpoint riêng cho scorer, không ảnh hưởng embedding. Hạn mức free tier tính theo project chứ không theo khoá, nên khoá của project khác có hạn mức riêng. Không đặt thì dùng `GEMINI_*`. Đã đặt `LLM_SCORER_BASE_URL` thì bắt buộc đặt `LLM_SCORER_API_KEY`: `GEMINI_API_KEY` không bao giờ được gửi sang host khác. |
 | `LLM_SCORER_REASONING_EFFORT` | Tuỳ chọn: `none`, `minimal`, `low`, `medium` hoặc `high`, gửi làm `reasoning_effort`. Không đặt thì không gửi. Dùng khi model reasoning ăn hết `max_tokens` làm output bị cắt. Giá trị sai thì tool trả `503 TOOL_NOT_CONFIGURED`. |
 | `LLM_SCORER_MODEL` | Model chấm điểm (tên Gemini, ví dụ `gemini-2.5-flash`). **Không có mặc định.** Chưa đo thời gian với Gemini: chạy `npx tsx scripts/check-gemini.ts` (xem [Chuyển sang Gemini](#chuyển-sang-gemini-free-tier)). |
@@ -149,13 +150,15 @@ có dùng), `WEBHOOK_HMAC_SECRETS`.
 
 ### Chuyển sang Gemini (free tier)
 
-Scorer và embedding đều gọi endpoint tương thích OpenAI của Gemini bằng `GEMINI_API_KEY`.
+Scorer và embedding dùng chung `GEMINI_API_KEY` nhưng đi qua hai endpoint khác nhau: scorer gọi endpoint
+tương thích OpenAI (`/v1beta/openai/chat/completions`), embedding gọi API gốc
+(`/v1beta/models/{model}:batchEmbedContents`, khoá ở header `x-goog-api-key`).
 Các điều cần biết khi dùng free tier và khi đổi từ OpenRouter:
 
 1. **Kiểm thử bằng khoá thật trước khi deploy:** `npx tsx scripts/check-gemini.ts` (thêm
    `--burst=10` để thử hạn mức). Script gọi đúng code production và kiểm: khoá hợp lệ, model có
-   trong danh sách, chat nhận `response_format`/`max_tokens`/`reasoning_effort`, embedding nhận
-   `dimensions`. Nó chỉ in mã HTTP, tên model, số chiều và thời gian, không in khoá hay body.
+   trong danh sách, chat nhận `response_format`/`max_tokens`/`reasoning_effort`, API gốc nhận
+   `embedContentConfig.outputDimensionality` (và thử cả cách đặt ở cấp trên cùng của schema cũ). Nó chỉ in mã HTTP, tên model, số chiều và thời gian, không in khoá hay body.
 2. **Hạn mức free tier thấp và tính theo project.** Mỗi lần check dùng
    `ceil(số ứng viên / LLM_SCORER_BATCH_SIZE)` request; mặc định batch 5 là 20 request cho 100
    ứng viên và dễ trả `429`. Khi đó response có `cause: "RATE_LIMITED"`. Tăng
@@ -164,8 +167,10 @@ Các điều cần biết khi dùng free tier và khi đổi từ OpenRouter:
 3. **Thinking bật mặc định** và token suy nghĩ có thể làm output bị cắt
    (`cause: "BAD_OUTPUT"`, `detail.reason: "truncated"`). Đặt `LLM_SCORER_REASONING_EFFORT=none`
    (2.5 Flash cho phép; 2.5 Pro và dòng 3 không tắt được).
-4. **Embedding:** `gemini-embedding-001` mặc định 3072 chiều, app gửi `dimensions: 1536` để khớp
-   collection Qdrant hiện có (không phải tạo lại collection). Vector đã index bằng
+4. **Embedding:** `gemini-embedding-001` mặc định 3072 chiều, app gửi `outputDimensionality: 1536` để
+   khớp collection Qdrant hiện có (không phải tạo lại collection), và tự chuẩn hoá L2 vector vì
+   Gemini không chuẩn hoá khi cắt khỏi 3072 chiều. App dùng `:batchEmbedContents` (một request cho
+   cả batch chunk) thay vì `:embedContent` từng chunk để tiết kiệm hạn mức request. Vector đã index bằng
    `text-embedding-3-small` vẫn nằm trong collection nhưng **không so sánh được** với vector mới.
    Tool `check-duplicates` hiện chỉ đọc nội dung nên không bị ảnh hưởng; cần index lại toàn bộ
    (VNAIP BE gửi lại sự kiện, hoặc `scripts/seed-ideas.ts`) trước khi dùng top-k theo vector (hướng B).
