@@ -60,13 +60,15 @@ test("gọi :batchEmbedContents với khoá ở header x-goog-api-key và trả 
     // Khoá KHÔNG đi qua Authorization hay query string (query string dễ lọt vào log).
     assert.equal(request!.headers.authorization, undefined);
     assert.doesNotMatch(request!.url, /key=|test-secret/);
-    // `outputDimensionality` (trong embedContentConfig) luôn được gửi: gemini-embedding-001 mặc
-    // định ra 3072 chiều, còn collection Qdrant là 1536 (xem DEFAULT_EMBEDDING_DIMENSIONS).
+    // `outputDimensionality` luôn được gửi ở cấp trên cùng của từng request: gemini-embedding-001
+    // mặc định ra 3072 chiều, còn collection Qdrant là 1536 (xem DEFAULT_EMBEDDING_DIMENSIONS).
+    // Đặt trong `embedContentConfig` thì API bỏ qua âm thầm (đã kiểm bằng khoá thật), nên test
+    // này khoá cả việc KHÔNG dùng `embedContentConfig`.
     assert.deepEqual(request!.body, {
       requests: ["a", "b", "c"].map((text) => ({
         model: "models/gemini-embedding-001",
         content: { parts: [{ text }] },
-        embedContentConfig: { outputDimensionality: DIMS },
+        outputDimensionality: DIMS,
       })),
     });
   } finally {

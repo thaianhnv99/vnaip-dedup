@@ -158,7 +158,8 @@ Các điều cần biết khi dùng free tier và khi đổi từ OpenRouter:
 1. **Kiểm thử bằng khoá thật trước khi deploy:** `npx tsx scripts/check-gemini.ts` (thêm
    `--burst=10` để thử hạn mức). Script gọi đúng code production và kiểm: khoá hợp lệ, model có
    trong danh sách, chat nhận `response_format`/`max_tokens`/`reasoning_effort`, API gốc nhận
-   `embedContentConfig.outputDimensionality` (và thử cả cách đặt ở cấp trên cùng của schema cũ). Nó chỉ in mã HTTP, tên model, số chiều và thời gian, không in khoá hay body.
+   `outputDimensionality` ở cấp trên cùng của request (thử cả `embedContentConfig.outputDimensionality`,
+   cách này bị API bỏ qua âm thầm và vẫn trả 3072 chiều). Nó chỉ in mã HTTP, tên model, số chiều và thời gian, không in khoá hay body.
 2. **Hạn mức free tier thấp và tính theo project.** Mỗi lần check dùng
    `ceil(số ứng viên / LLM_SCORER_BATCH_SIZE)` request; mặc định batch 5 là 20 request cho 100
    ứng viên và dễ trả `429`. Khi đó response có `cause: "RATE_LIMITED"`. Tăng

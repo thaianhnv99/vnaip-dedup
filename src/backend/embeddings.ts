@@ -7,8 +7,9 @@ import { createHash } from "node:crypto";
  * Khoá API đi qua header `x-goog-api-key`.
  *
  * gemini-embedding-001 mặc định ra 3072 chiều nhưng cắt được về 128..3072 (khuyến nghị 768,
- * 1536, 3072) bằng `embedContentConfig.outputDimensionality`, nên request luôn gửi giá trị
- * này để ra đúng 1536 chiều, khớp collection Qdrant đã tạo. Tài liệu Gemini nói model này
+ * 1536, 3072) bằng `outputDimensionality` đặt ở cấp trên cùng của từng request (đã kiểm bằng
+ * khoá thật 2026-11-05; đặt trong `embedContentConfig` thì bị bỏ qua và vẫn ra 3072 chiều), nên
+ * request luôn gửi giá trị này để ra đúng 1536 chiều, khớp collection Qdrant đã tạo. Tài liệu Gemini nói model này
  * KHÔNG tự chuẩn hoá khi cắt khác 3072, nên client tự chuẩn hoá L2 (gemini-embedding-2 đã
  * chuẩn hoá sẵn; chuẩn hoá lại không đổi gì đáng kể).
  *
@@ -152,7 +153,9 @@ async function embedBatch(
           requests: batch.map((text) => ({
             model: `models/${modelId}`,
             content: { parts: [{ text }] },
-            embedContentConfig: { outputDimensionality: config.dimensions },
+            // PHẢI ở cấp trên cùng của từng request. `embedContentConfig.outputDimensionality`
+            // (theo tài liệu SDK) bị API REST bỏ qua âm thầm: vẫn HTTP 200 nhưng trả 3072 chiều.
+            outputDimensionality: config.dimensions,
           })),
         }),
         signal: AbortSignal.timeout(config.timeoutMs),

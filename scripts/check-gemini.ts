@@ -5,8 +5,10 @@
  * Kiểm ba thứ mà tài liệu Gemini không nói rõ:
  *   1. Chat có nhận `response_format: json_object`, `max_tokens` và `reasoning_effort` không.
  *   2. Endpoint gốc `models/{model}:embedContent` có nhận `outputDimensionality` (ra 1536 chiều
- *      khớp Qdrant) không, và nhận ở đâu: trong `embedContentConfig` (theo tài liệu hiện hành) hay
- *      ở cấp trên cùng (schema cũ). Client production gửi theo cách thứ nhất.
+ *      khớp Qdrant) không, và nhận ở đâu. Đã kiểm (2026-11-05): chỉ cấp trên cùng của request có
+ *      tác dụng; `embedContentConfig.outputDimensionality` bị bỏ qua âm thầm (HTTP 200 nhưng vẫn
+ *      3072 chiều). Client production gửi ở cấp trên cùng; script vẫn thử cả hai để bắt trường hợp
+ *      Google đổi hành vi.
  *   3. (tuỳ chọn) `--burst=N`: bắn N request chat song song để xem bao nhiêu bị 429, từ đó chọn
  *      LLM_SCORER_CONCURRENCY / LLM_SCORER_BATCH_SIZE cho free tier. Mỗi request tốn quota.
  *
@@ -126,8 +128,8 @@ async function checkEmbedding() {
   };
   const d = config.dimensions;
   console.log(`  không gửi số chiều                              → ${await probe({})} (mặc định của model)`);
-  console.log(`  embedContentConfig.outputDimensionality=${d}   → ${await probe({ embedContentConfig: { outputDimensionality: d } })}  <- cách client production dùng`);
-  console.log(`  outputDimensionality=${d} ở cấp trên cùng      → ${await probe({ outputDimensionality: d })}`);
+  console.log(`  embedContentConfig.outputDimensionality=${d}   → ${await probe({ embedContentConfig: { outputDimensionality: d } })}  (bị bỏ qua nếu vẫn ra số chiều mặc định)`);
+  console.log(`  outputDimensionality=${d} ở cấp trên cùng      → ${await probe({ outputDimensionality: d })}  <- cách client production dùng`);
 
   try {
     const vectors = await createHttpEmbedder(config)(['Ứng dụng báo cáo sự cố', 'Quy trình tuyển dụng']);
@@ -139,7 +141,7 @@ async function checkEmbedding() {
   } catch (error) {
     if (!(error instanceof EmbeddingError)) throw error;
     fail(`${error.code}: ${error.message}`);
-    console.log('    nếu dòng "cách client production dùng" không ra đúng số chiều nhưng dòng "cấp trên cùng" thì ra đúng: API đang dùng schema cũ, báo lại kết quả này để đổi cách gọi.');
+    console.log('    nếu dòng "cách client production dùng" không ra đúng số chiều: Google đã đổi chỗ nhận outputDimensionality; so với dòng embedContentConfig ở trên để chọn cách gọi đúng.');
   }
 }
 
