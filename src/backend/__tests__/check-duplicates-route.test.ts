@@ -67,6 +67,7 @@ test('input sai schema trả 400 INVALID_INPUT', async () => {
 
   assert.equal(state.status, 400);
   assert.equal((state.body as any).code, 'INVALID_INPUT');
+  assert.equal((state.body as any).requestId, 'req-1');
 });
 
 test('nguồn ứng viên lỗi trả 502 CANDIDATES_UNAVAILABLE, không lộ chi tiết lỗi gốc', async () => {
@@ -83,8 +84,27 @@ test('nguồn ứng viên lỗi trả 502 CANDIDATES_UNAVAILABLE, không lộ ch
 
   assert.equal(state.status, 502);
   assert.equal((state.body as any).code, 'CANDIDATES_UNAVAILABLE');
+  assert.equal((state.body as any).requestId, 'req-1');
   assert.doesNotMatch(JSON.stringify(state.body), /super-secret-abc/);
   assert.doesNotMatch(JSON.stringify(state.body), /10\.0\.0\.5/);
+});
+
+test('lỗi lấy ứng viên không kèm cause/detail trong body (chỉ lỗi chấm điểm mới có)', async () => {
+  const deps: DedupDependencies = {
+    findCandidates: async () => {
+      throw new VectorStoreError('TIMEOUT', 'Gọi Qdrant quá thời gian cho phép');
+    },
+    scoreCandidates: async () => [],
+  };
+  const handler = createCheckDuplicatesHandler(deps, {});
+  const { request, response, state } = fakeRequestResponse({ body: { input: validInput } });
+
+  await handler(request, response, () => {});
+
+  assert.equal(state.status, 502);
+  assert.equal((state.body as any).code, 'CANDIDATES_UNAVAILABLE');
+  assert.equal('cause' in (state.body as object), false);
+  assert.equal('detail' in (state.body as object), false);
 });
 
 test('model lỗi trả 502 SCORING_UNAVAILABLE', async () => {
@@ -101,6 +121,91 @@ test('model lỗi trả 502 SCORING_UNAVAILABLE', async () => {
 
   assert.equal(state.status, 502);
   assert.equal((state.body as any).code, 'SCORING_UNAVAILABLE');
+  assert.equal((state.body as any).requestId, 'req-1');
+  // Lỗi gốc không phải LlmScorerError thì không có gì an toàn để nêu: không cause/detail.
+  assert.equal('cause' in (state.body as object), false);
+  assert.equal('detail' in (state.body as object), false);
+});
+
+test('output model bị cắt: body nêu cause BAD_OUTPUT và detail đã lọc, không lộ nội dung model', async () => {
+  const deps: DedupDependencies = {
+    findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'A', content: 'x' }],
+    scoreCandidates: async () => {
+      throw new LlmScorerError('BAD_OUTPUT', 'Output của model bị cắt vì hết giới hạn token (max_tokens)', {
+        detail: {
+          reason: 'truncated',
+          finishReason: 'length',
+          contentLength: 371,
+          contentHead: 'BÍ MẬT XYZ-123',
+          topLevelKeys: ['BÍ MẬT XYZ-123'],
+        },
+      });
+    },
+  };
+  const handler = createCheckDuplicatesHandler(deps, {});
+  const { request, response, state } = fakeRequestResponse({ body: { input: validInput } });
+
+  await handler(request, response, () => {});
+
+  assert.equal(state.status, 502);
+  assert.deepEqual(state.body, {
+    code: 'SCORING_UNAVAILABLE',
+    message: 'Model chấm điểm tương đồng thất bại. Vui lòng thử lại sau.',
+    requestId: 'req-1',
+    cause: 'BAD_OUTPUT',
+    detail: { reason: 'truncated', finishReason: 'length', contentLength: 371 },
+  });
+  assert.doesNotMatch(JSON.stringify(state.body), /BÍ MẬT|XYZ-123/);
+});
+
+test('lỗi chấm điểm không có detail: body có cause nhưng không có field detail', async () => {
+  const deps: DedupDependencies = {
+    findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'A', content: 'x' }],
+    scoreCandidates: async () => {
+      throw new LlmScorerError('TIMEOUT', 'Model chấm điểm quá thời gian cho phép');
+    },
+  };
+  const handler = createCheckDuplicatesHandler(deps, {});
+  const { request, response, state } = fakeRequestResponse({ body: { input: validInput } });
+
+  await handler(request, response, () => {});
+
+  assert.equal((state.body as any).cause, 'TIMEOUT');
+  assert.equal('detail' in (state.body as object), false);
+});
+
+test('code thô của thư viện/Node (ECONNREFUSED...) không bao giờ vào cause của body', async () => {
+  const deps: DedupDependencies = {
+    findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'A', content: 'x' }],
+    scoreCandidates: async () => {
+      throw Object.assign(new Error('connect ECONNREFUSED 10.0.0.5:443'), { code: 'ECONNREFUSED' });
+    },
+  };
+  const handler = createCheckDuplicatesHandler(deps, {});
+  const { request, response, state } = fakeRequestResponse({ body: { input: validInput } });
+
+  await handler(request, response, () => {});
+
+  assert.equal((state.body as any).code, 'SCORING_UNAVAILABLE');
+  assert.equal('cause' in (state.body as object), false);
+  assert.doesNotMatch(JSON.stringify(state.body), /ECONNREFUSED|10\.0\.0\.5/);
+});
+
+test('NOT_CONFIGURED của scorer không lộ qua cause dù bị bọc trong SCORING_UNAVAILABLE', async () => {
+  const deps: DedupDependencies = {
+    findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'A', content: 'x' }],
+    scoreCandidates: async () => {
+      throw new LlmScorerError('NOT_CONFIGURED', 'thiếu OPENROUTER_API_KEY hoặc LLM_SCORER_MODEL');
+    },
+  };
+  const handler = createCheckDuplicatesHandler(deps, {});
+  const { request, response, state } = fakeRequestResponse({ body: { input: validInput } });
+
+  await handler(request, response, () => {});
+
+  assert.equal((state.body as any).code, 'SCORING_UNAVAILABLE');
+  assert.equal('cause' in (state.body as object), false);
+  assert.doesNotMatch(JSON.stringify(state.body), /OPENROUTER|LLM_SCORER/);
 });
 
 test('không có ứng viên trả 200 với matches rỗng (phân biệt với lỗi)', async () => {

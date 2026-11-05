@@ -107,6 +107,15 @@ thực của Core (không bao giờ với body hay header). Đặt nhiều danh 
   trùng" sai. Chạm trần là tín hiệu chuyển sang hướng B (top-k theo vector; vector đã được lưu sẵn).
 - **Lỗi một phần là lỗi.** Một batch chấm điểm lỗi hoặc hết giờ thì cả lời gọi trả `502
   SCORING_UNAVAILABLE`; không trả điểm của một phần ứng viên.
+- **Body lỗi có mã truy vết và lý do gốc của lỗi chấm điểm.** Mọi lỗi của tool kèm
+  `requestId` (cùng giá trị header `x-request-id` và field `requestId` trong log
+  `check_duplicates_failed`). Riêng `502 SCORING_UNAVAILABLE` do scorer gây ra còn có `cause`
+  (`BAD_OUTPUT`, `TIMEOUT`, `AUTH_ERROR`, `NETWORK_ERROR`) và `detail` (chỉ các field trong
+  allow-list: `reason`, `finishReason`, `jsonType`, `contentLength`, `topLevelKeyCount`,
+  `expectedCount`, `scoredCount`). Ví dụ output bị cắt:
+  `{"code":"SCORING_UNAVAILABLE","message":"…","requestId":"…","cause":"BAD_OUTPUT","detail":{"reason":"truncated","finishReason":"length","contentLength":371}}`.
+  Không bao giờ có nội dung model sinh, nội dung hồ sơ hay message gốc của provider; những thứ
+  đó không ra khỏi app. Lỗi lấy ứng viên (`CANDIDATES_UNAVAILABLE`) chỉ có `requestId`.
 - **Chỉ so sánh sáng kiến cùng `type`** với input (`ideas`, `solutions` hoặc `initiatives`),
   đọc từ collection riêng của type đó. Trần `CHECK_DUPLICATES_CANDIDATE_LIMIT` và giới hạn đọc
   tính theo từng type, không cộng dồn các type.

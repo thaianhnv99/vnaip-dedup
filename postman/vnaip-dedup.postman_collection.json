@@ -328,6 +328,92 @@
           }
         }
       ]
+    },
+    {
+      "name": "Check duplicates (qua SotaAgents Core, stg)",
+      "request": {
+        "method": "POST",
+        "description": "Goi tool check-duplicates QUA SotaAgents Core (khong goi thang vao app). Dung environment 'vnaip-dedup (Core - stg)'. Can bien sotaAuthToken (Bearer token hop le cua service account VNAIP, co scope tool:check-duplicates trong workspace nay) va service account phai nam trong CHECK_DUPLICATES_ALLOWED_* da cau hinh o app, neu khong se nhan 403 CALLER_NOT_ALLOWED.",
+        "header": [
+          { "key": "Accept", "value": "*/*" },
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "x-org-id", "value": "{{orgId}}" },
+          { "key": "x-ws-id", "value": "{{wsId}}" },
+          { "key": "Authorization", "value": "Bearer {{sotaAuthToken}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"type\": \"ideas\",\n  \"title\": \"Ung dung di dong bao cao su co mat dat theo thoi gian thuc\",\n  \"content\": \"Nguoi lap ke hoach\",\n  \"excludeIds\": []\n}"
+        },
+        "url": {
+          "raw": "{{coreBaseUrl}}/api/v3/app-tools/vnaip-dedup/check-duplicates?_sotaEnvironment={{sotaEnvironment}}&_sotaEnvironmentId={{sotaEnvironmentId}}",
+          "host": ["{{coreBaseUrl}}"],
+          "path": ["api", "v3", "app-tools", "vnaip-dedup", "check-duplicates"],
+          "query": [
+            { "key": "_sotaEnvironment", "value": "{{sotaEnvironment}}" },
+            { "key": "_sotaEnvironmentId", "value": "{{sotaEnvironmentId}}" }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status 200', () => pm.response.to.have.status(200));",
+              "pm.test('body co matches[] dung schema', () => {",
+              "  const body = pm.response.json();",
+              "  pm.expect(body.matches).to.be.an('array');",
+              "  body.matches.forEach((match) => {",
+              "    pm.expect(match.type).to.eql('ideas');",
+              "    pm.expect(match.id).to.be.a('string');",
+              "    pm.expect(match.score).to.be.within(0, 1);",
+              "    pm.expect(match.percent).to.be.within(0, 100);",
+              "    pm.expect(match.reason).to.be.a('string');",
+              "  });",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Check duplicates - khong co token (401)",
+      "request": {
+        "method": "POST",
+        "description": "Khong gui header Authorization: Core tu choi truoc khi toi app. Dung de kiem tra nhanh moi truong da tro dung Core/app chua bi nham voi webhook (webhook dung HMAC, tool nay dung Bearer JWT).",
+        "header": [
+          { "key": "Accept", "value": "*/*" },
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "x-org-id", "value": "{{orgId}}" },
+          { "key": "x-ws-id", "value": "{{wsId}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"type\": \"ideas\",\n  \"title\": \"Test khong token\",\n  \"content\": \"Noi dung.\"\n}"
+        },
+        "url": {
+          "raw": "{{coreBaseUrl}}/api/v3/app-tools/vnaip-dedup/check-duplicates?_sotaEnvironment={{sotaEnvironment}}&_sotaEnvironmentId={{sotaEnvironmentId}}",
+          "host": ["{{coreBaseUrl}}"],
+          "path": ["api", "v3", "app-tools", "vnaip-dedup", "check-duplicates"],
+          "query": [
+            { "key": "_sotaEnvironment", "value": "{{sotaEnvironment}}" },
+            { "key": "_sotaEnvironmentId", "value": "{{sotaEnvironmentId}}" }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status 401', () => pm.response.to.have.status(401));"
+            ]
+          }
+        }
+      ]
     }
   ]
 }

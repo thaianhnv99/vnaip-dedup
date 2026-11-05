@@ -112,6 +112,7 @@ export function createCheckDuplicatesHandler(
       response.status(400).json({
         code: "INVALID_INPUT",
         message: error instanceof Error ? error.message : "Input không hợp lệ",
+        ...requestIdField(requestId),
       });
       return;
     }
@@ -142,9 +143,41 @@ export function createCheckDuplicatesHandler(
         // JSON), đã lọc qua allow-list — không chứa nội dung model sinh hay hồ sơ người dùng.
         ...(detail ? { detail } : {}),
       });
-      response.status(status).json({ code, message });
+      response.status(status).json({
+        code,
+        message,
+        ...requestIdField(requestId),
+        ...scoringFailureField(error, detail),
+      });
     }
   };
+}
+
+/**
+ * Mã truy vết trả kèm lỗi để caller đối chiếu với log của app (`requestId` trong
+ * `check_duplicates_failed`). Cùng giá trị với header `x-request-id`; chỉ đưa vào body
+ * khi là chuỗi không rỗng.
+ */
+function requestIdField(requestId: unknown): { requestId?: string } {
+  return typeof requestId === "string" && requestId.length > 0 ? { requestId } : {};
+}
+
+/**
+ * Lý do gốc của lỗi chấm điểm, để caller phân biệt "output bị cắt" với "hết giờ" hay
+ * "provider từ chối" mà không cần đọc log. Chỉ áp dụng cho `SCORING_UNAVAILABLE` có
+ * nguyên nhân là `LlmScorerError`: `cause` luôn là một trong các mã cố định của scorer
+ * (không bao giờ là `code` thô của Node/thư viện như ECONNREFUSED), còn `detail` đã qua
+ * allow-list của `rootErrorDetail()` nên không có nội dung model sinh, hồ sơ hay khoá.
+ * `NOT_CONFIGURED` bị loại vì nó nêu tên biến môi trường và đã có nhánh 503 riêng.
+ */
+function scoringFailureField(
+  error: unknown,
+  detail: Record<string, string | number> | undefined,
+): { cause?: string; detail?: Record<string, string | number> } {
+  if (!(error instanceof DedupError) || error.code !== "SCORING_UNAVAILABLE") return {};
+  const source = error.cause;
+  if (!(source instanceof LlmScorerError) || source.code === "NOT_CONFIGURED") return {};
+  return { cause: source.code, ...(detail ? { detail } : {}) };
 }
 
 function mapErrorToResponse(error: unknown): {
