@@ -4,6 +4,7 @@ import { buildDependencies, createCheckDuplicatesHandler } from '../check-duplic
 import type { DedupDependencies } from '../dedup.js';
 import type { Request, Response } from 'express';
 import { LlmScorerError } from '../llm-scorer.js';
+import { EmbeddingError } from '../embeddings.js';
 import { VectorStoreError, pointId } from '../vector-store.js';
 import { createVectorStoresFromEnv } from '../qdrant-store.js';
 import { DEFAULT_EMBEDDING_DIMENSIONS } from '../embeddings.js';
@@ -40,7 +41,7 @@ const validInput = {
 
 test('request hợp lệ trả 200 với output đúng schema', async () => {
   const deps: DedupDependencies = {
-    findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'A', content: 'nội dung A' }],
+    embedInput: async () => [[1]], findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'A', content: 'nội dung A' }],
     scoreCandidates: async () => [{ id: 'a', percent: 60, reason: 'giống nhau' }],
   };
 
@@ -57,7 +58,7 @@ test('request hợp lệ trả 200 với output đúng schema', async () => {
 
 test('input sai schema trả 400 INVALID_INPUT', async () => {
   const deps: DedupDependencies = {
-    findCandidates: async () => [],
+    embedInput: async () => [[1]], findCandidates: async () => [],
     scoreCandidates: async () => [],
   };
   const handler = createCheckDuplicatesHandler(deps, {});
@@ -72,7 +73,7 @@ test('input sai schema trả 400 INVALID_INPUT', async () => {
 
 test('nguồn ứng viên lỗi trả 502 CANDIDATES_UNAVAILABLE, không lộ chi tiết lỗi gốc', async () => {
   const deps: DedupDependencies = {
-    findCandidates: async () => {
+    embedInput: async () => [[1]], findCandidates: async () => {
       throw new Error('ECONNREFUSED 10.0.0.5:443 token=super-secret-abc');
     },
     scoreCandidates: async () => [],
@@ -91,7 +92,7 @@ test('nguồn ứng viên lỗi trả 502 CANDIDATES_UNAVAILABLE, không lộ ch
 
 test('lỗi lấy ứng viên không kèm cause/detail trong body (chỉ lỗi chấm điểm mới có)', async () => {
   const deps: DedupDependencies = {
-    findCandidates: async () => {
+    embedInput: async () => [[1]], findCandidates: async () => {
       throw new VectorStoreError('TIMEOUT', 'Gọi Qdrant quá thời gian cho phép');
     },
     scoreCandidates: async () => [],
@@ -109,7 +110,7 @@ test('lỗi lấy ứng viên không kèm cause/detail trong body (chỉ lỗi c
 
 test('model lỗi trả 502 SCORING_UNAVAILABLE', async () => {
   const deps: DedupDependencies = {
-    findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'A', content: 'x' }],
+    embedInput: async () => [[1]], findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'A', content: 'x' }],
     scoreCandidates: async () => {
       throw new Error('provider 500');
     },
@@ -129,7 +130,7 @@ test('model lỗi trả 502 SCORING_UNAVAILABLE', async () => {
 
 test('output model bị cắt: body nêu cause BAD_OUTPUT và detail đã lọc, không lộ nội dung model', async () => {
   const deps: DedupDependencies = {
-    findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'A', content: 'x' }],
+    embedInput: async () => [[1]], findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'A', content: 'x' }],
     scoreCandidates: async () => {
       throw new LlmScorerError('BAD_OUTPUT', 'Output của model bị cắt vì hết giới hạn token (max_tokens)', {
         detail: {
@@ -160,7 +161,7 @@ test('output model bị cắt: body nêu cause BAD_OUTPUT và detail đã lọc,
 
 test('lỗi chấm điểm không có detail: body có cause nhưng không có field detail', async () => {
   const deps: DedupDependencies = {
-    findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'A', content: 'x' }],
+    embedInput: async () => [[1]], findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'A', content: 'x' }],
     scoreCandidates: async () => {
       throw new LlmScorerError('TIMEOUT', 'Model chấm điểm quá thời gian cho phép');
     },
@@ -176,7 +177,7 @@ test('lỗi chấm điểm không có detail: body có cause nhưng không có f
 
 test('code thô của thư viện/Node (ECONNREFUSED...) không bao giờ vào cause của body', async () => {
   const deps: DedupDependencies = {
-    findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'A', content: 'x' }],
+    embedInput: async () => [[1]], findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'A', content: 'x' }],
     scoreCandidates: async () => {
       throw Object.assign(new Error('connect ECONNREFUSED 10.0.0.5:443'), { code: 'ECONNREFUSED' });
     },
@@ -193,7 +194,7 @@ test('code thô của thư viện/Node (ECONNREFUSED...) không bao giờ vào c
 
 test('NOT_CONFIGURED của scorer không lộ qua cause dù bị bọc trong SCORING_UNAVAILABLE', async () => {
   const deps: DedupDependencies = {
-    findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'A', content: 'x' }],
+    embedInput: async () => [[1]], findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'A', content: 'x' }],
     scoreCandidates: async () => {
       throw new LlmScorerError('NOT_CONFIGURED', 'thiếu GEMINI_API_KEY hoặc LLM_SCORER_MODEL');
     },
@@ -210,7 +211,7 @@ test('NOT_CONFIGURED của scorer không lộ qua cause dù bị bọc trong SCO
 
 test('không có ứng viên trả 200 với matches rỗng (phân biệt với lỗi)', async () => {
   const deps: DedupDependencies = {
-    findCandidates: async () => [],
+    embedInput: async () => [[1]], findCandidates: async () => [],
     scoreCandidates: async () => {
       throw new Error('không nên được gọi khi không có ứng viên');
     },
@@ -233,7 +234,7 @@ test('log lỗi không chứa nội dung hồ sơ (title/content) hoặc bí m�
 
   try {
     const deps: DedupDependencies = {
-      findCandidates: async () => {
+      embedInput: async () => [[1]], findCandidates: async () => {
         throw new Error('network down, Authorization: Bearer abc.def.ghi');
       },
       scoreCandidates: async () => [],
@@ -266,26 +267,163 @@ function captureLog() {
   };
 }
 
-test('trần ứng viên vượt quá trả 503 CANDIDATE_LIMIT_EXCEEDED thay vì kết quả thiếu', async () => {
+function manyCandidates(count: number) {
+  return Array.from({ length: count }, (_, i) => ({ id: `c${i}`, type: 'solutions' as const, title: 't', content: 'c' }));
+}
+
+test('CHECK_DUPLICATES_TOP_K là k của top-k: truyền cho nguồn ứng viên và giới hạn số ứng viên gửi model', async () => {
+  let query: unknown;
+  let scored = 0;
   const deps: DedupDependencies = {
-    findCandidates: async () =>
-      Array.from({ length: 3 }, (_, i) => ({ id: `c${i}`, type: 'solutions' as const, title: 't', content: 'c' })),
-    scoreCandidates: async () => {
-      throw new Error('không nên được gọi');
+    embedInput: async () => [[1, 2, 3]],
+    findCandidates: async (_input, received) => {
+      query = received;
+      return manyCandidates(5);
+    },
+    scoreCandidates: async (_input, candidates) => {
+      scored = candidates.length;
+      return [];
     },
   };
-  const handler = createCheckDuplicatesHandler(deps, { CHECK_DUPLICATES_CANDIDATE_LIMIT: '2' });
+  const handler = createCheckDuplicatesHandler(deps, { CHECK_DUPLICATES_TOP_K: '2' });
+  const { request, response, state } = fakeRequestResponse({ body: { input: validInput } });
+
+  await handler(request, response, () => {});
+
+  assert.equal(state.status, 200);
+  assert.deepEqual(query, { vectors: [[1, 2, 3]], limit: 2 });
+  assert.equal(scored, 2, 'nguồn trả thừa thì vẫn chỉ k ứng viên tới model');
+});
+
+test('mặc định k = 20 khi không đặt CHECK_DUPLICATES_TOP_K', async () => {
+  let limit: number | undefined;
+  const deps: DedupDependencies = {
+    embedInput: async () => [[1]],
+    findCandidates: async (_input, query) => {
+      limit = query.limit;
+      return [];
+    },
+    scoreCandidates: async () => [],
+  };
+  const { request, response } = fakeRequestResponse({ body: { input: validInput } });
+
+  await createCheckDuplicatesHandler(deps, {})(request, response, () => {});
+
+  assert.equal(limit, 20);
+});
+
+test('giá trị CHECK_DUPLICATES_TOP_K không hợp lệ rơi về mặc định 20, không tắt giới hạn', async () => {
+  for (const raw of ['0', '-5', 'abc', '101', '1.5', '']) {
+    let limit: number | undefined;
+    let scored = 0;
+    const handler = createCheckDuplicatesHandler(
+      {
+        embedInput: async () => [[1]],
+        findCandidates: async (_input, query) => {
+          limit = query.limit;
+          return manyCandidates(30);
+        },
+        scoreCandidates: async (_input, candidates) => {
+          scored = candidates.length;
+          return [];
+        },
+      },
+      { CHECK_DUPLICATES_TOP_K: raw },
+    );
+    const { request, response, state } = fakeRequestResponse({ body: { input: validInput } });
+    await handler(request, response, () => {});
+    assert.equal(state.status, 200, `giá trị ${JSON.stringify(raw)}`);
+    assert.equal(limit, 20, `giá trị ${JSON.stringify(raw)} phải rơi về mặc định 20`);
+    assert.equal(scored, 20);
+  }
+});
+
+test('CHECK_DUPLICATES_CANDIDATE_LIMIT cũ không còn được đọc: không làm thay đổi k', async () => {
+  let limit: number | undefined;
+  const deps: DedupDependencies = {
+    embedInput: async () => [[1]],
+    findCandidates: async (_input, query) => {
+      limit = query.limit;
+      return [];
+    },
+    scoreCandidates: async () => [],
+  };
+  const { request, response } = fakeRequestResponse({ body: { input: validInput } });
+
+  await createCheckDuplicatesHandler(deps, { CHECK_DUPLICATES_CANDIDATE_LIMIT: '500' })(request, response, () => {});
+
+  assert.equal(limit, 20);
+});
+
+// --- Bước embed input ---
+
+test('embedding lỗi trả 502 EMBEDDING_UNAVAILABLE kèm cause cố định, không tìm ứng viên, không lộ message gốc', async () => {
+  const { lines, log } = captureLog();
+  let touched = 0;
+  const deps: DedupDependencies = {
+    embedInput: async () => {
+      throw new EmbeddingError('RATE_LIMITED', 'Gemini giới hạn tốc độ/hết quota (HTTP 429) key=AIza-secret-123');
+    },
+    findCandidates: async () => {
+      touched += 1;
+      return [];
+    },
+    scoreCandidates: async () => {
+      touched += 1;
+      return [];
+    },
+  };
+  const handler = createCheckDuplicatesHandler(deps, {}, log);
+  const { request, response, state } = fakeRequestResponse({ body: { input: validInput } });
+
+  await handler(request, response, () => {});
+
+  assert.equal(state.status, 502);
+  assert.equal((state.body as any).code, 'EMBEDDING_UNAVAILABLE');
+  assert.equal((state.body as any).cause, 'RATE_LIMITED');
+  assert.equal((state.body as any).requestId, 'req-1');
+  assert.equal('detail' in (state.body as object), false);
+  assert.doesNotMatch(JSON.stringify(state.body), /AIza-secret-123/);
+  assert.equal(touched, 0);
+  const failed = lines.find((l) => l.event === 'check_duplicates_failed');
+  assert.equal(failed?.code, 'EMBEDDING_UNAVAILABLE');
+  assert.equal(failed?.cause, 'RATE_LIMITED');
+});
+
+test('lỗi embedding không phải EmbeddingError thì 502 EMBEDDING_UNAVAILABLE không kèm cause (không có gì an toàn để nêu)', async () => {
+  const deps: DedupDependencies = {
+    embedInput: async () => {
+      throw new Error('ECONNREFUSED 10.0.0.5:443 token=super-secret-abc');
+    },
+    findCandidates: async () => [],
+    scoreCandidates: async () => [],
+  };
+  const { request, response, state } = fakeRequestResponse({ body: { input: validInput } });
+
+  await createCheckDuplicatesHandler(deps, {})(request, response, () => {});
+
+  assert.equal(state.status, 502);
+  assert.equal((state.body as any).code, 'EMBEDDING_UNAVAILABLE');
+  assert.equal('cause' in (state.body as object), false);
+  assert.doesNotMatch(JSON.stringify(state.body), /super-secret-abc|10\.0\.0\.5/);
+});
+
+test('thiếu cấu hình embedding trả 503 TOOL_NOT_CONFIGURED, không nêu tên biến môi trường ra ngoài', async () => {
+  const handler = createCheckDuplicatesHandler(() => {
+    throw new EmbeddingError('NOT_CONFIGURED', 'Embedding chưa được cấu hình (thiếu GEMINI_API_KEY)');
+  }, {});
   const { request, response, state } = fakeRequestResponse({ body: { input: validInput } });
 
   await handler(request, response, () => {});
 
   assert.equal(state.status, 503);
-  assert.equal((state.body as any).code, 'CANDIDATE_LIMIT_EXCEEDED');
+  assert.equal((state.body as any).code, 'TOOL_NOT_CONFIGURED');
+  assert.doesNotMatch(JSON.stringify(state.body), /GEMINI_API_KEY/);
 });
 
 test('nguồn ứng viên báo vượt giới hạn đọc (DedupError) cũng trả 503, không phải 502', async () => {
   const deps: DedupDependencies = {
-    findCandidates: async () => {
+    embedInput: async () => [[1]], findCandidates: async () => {
       throw new DedupError('CANDIDATE_LIMIT_EXCEEDED', 'kho quá lớn');
     },
     scoreCandidates: async () => [],
@@ -299,24 +437,6 @@ test('nguồn ứng viên báo vượt giới hạn đọc (DedupError) cũng tr
   assert.equal((state.body as any).code, 'CANDIDATE_LIMIT_EXCEEDED');
 });
 
-test('giá trị CHECK_DUPLICATES_CANDIDATE_LIMIT không hợp lệ rơi về mặc định 100, không tắt giới hạn', async () => {
-  const candidates = Array.from({ length: 101 }, (_, i) => ({
-    id: `c${i}`,
-    type: 'solutions' as const,
-    title: 't',
-    content: 'c',
-  }));
-  for (const raw of ['0', '-5', 'abc', '501', '1.5', '']) {
-    const handler = createCheckDuplicatesHandler(
-      { findCandidates: async () => candidates, scoreCandidates: async () => [] },
-      { CHECK_DUPLICATES_CANDIDATE_LIMIT: raw },
-    );
-    const { request, response, state } = fakeRequestResponse({ body: { input: validInput } });
-    await handler(request, response, () => {});
-    assert.equal(state.status, 503, `giá trị ${JSON.stringify(raw)} phải rơi về mặc định 100`);
-  }
-});
-
 test('thiếu cấu hình trả 503 TOOL_NOT_CONFIGURED, và lần gọi sau chạy được khi đã sửa cấu hình', async () => {
   const { lines, log } = captureLog();
   let configured = false;
@@ -328,7 +448,7 @@ test('thiếu cấu hình trả 503 TOOL_NOT_CONFIGURED, và lần gọi sau ch�
         throw new VectorStoreError('NOT_CONFIGURED', 'Qdrant chưa được cấu hình (thiếu QDRANT_URL hoặc QDRANT_COLLECTION_PREFIX)');
       }
       return {
-        findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'A', content: 'x' }],
+        embedInput: async () => [[1]], findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'A', content: 'x' }],
         scoreCandidates: async () => [{ id: 'a', percent: 40, reason: 'ok' }],
       };
     },
@@ -371,7 +491,7 @@ test('log thành công và thất bại ghi mã, số lượng, thời gian; kh�
   const { lines, log } = captureLog();
   const ok = createCheckDuplicatesHandler(
     {
-      findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'TIÊU ĐỀ BÍ MẬT', content: 'NỘI DUNG BÍ MẬT' }],
+      embedInput: async () => [[1]], findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'TIÊU ĐỀ BÍ MẬT', content: 'NỘI DUNG BÍ MẬT' }],
       scoreCandidates: async () => [{ id: 'a', percent: 60, reason: 'LÝ DO BÍ MẬT' }],
     },
     {},
@@ -382,7 +502,7 @@ test('log thành công và thất bại ghi mã, số lượng, thời gian; kh�
 
   const failing = createCheckDuplicatesHandler(
     {
-      findCandidates: async () => {
+      embedInput: async () => [[1]], findCandidates: async () => {
         throw new VectorStoreError('TIMEOUT', 'Gọi Qdrant quá thời gian cho phép');
       },
       scoreCandidates: async () => [],
@@ -406,7 +526,7 @@ test('log lỗi chỉ ghi các field detail trong allow-list, đúng kiểu và 
   const { lines, log } = captureLog();
   const handler = createCheckDuplicatesHandler(
     {
-      findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'A', content: 'x' }],
+      embedInput: async () => [[1]], findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'A', content: 'x' }],
       scoreCandidates: async () => {
         throw new LlmScorerError('BAD_OUTPUT', 'Model trả JSON sai định dạng', {
           detail: {
@@ -417,6 +537,14 @@ test('log lỗi chỉ ghi các field detail trong allow-list, đúng kiểu và 
             topLevelKeyCount: Number.NaN,
             expectedCount: 5,
             scoredCount: 3,
+            entryCount: 4,
+            malformedCount: 1,
+            unknownIdCount: 0,
+            duplicateCount: 0,
+            percentNotIntegerCount: 1,
+            percentOutOfRangeCount: 0,
+            reasonBlankCount: 0,
+            percentRejected: [0.85, 'BÍ MẬT XYZ-123'],
             contentHead: 'BÍ MẬT XYZ-123',
             topLevelKeys: ['BÍ MẬT XYZ-123'],
           },
@@ -438,6 +566,13 @@ test('log lỗi chỉ ghi các field detail trong allow-list, đúng kiểu và 
     contentLength: 42,
     expectedCount: 5,
     scoredCount: 3,
+    entryCount: 4,
+    malformedCount: 1,
+    unknownIdCount: 0,
+    duplicateCount: 0,
+    percentNotIntegerCount: 1,
+    percentOutOfRangeCount: 0,
+    reasonBlankCount: 0,
   });
   assert.doesNotMatch(JSON.stringify(lines), /BÍ MẬT|BÍ_MẬT|XYZ-123/);
 });
@@ -446,7 +581,7 @@ test('log lỗi không có field detail khi lỗi gốc không kèm detail hợp
   const { lines, log } = captureLog();
   const handler = createCheckDuplicatesHandler(
     {
-      findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'A', content: 'x' }],
+      embedInput: async () => [[1]], findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'A', content: 'x' }],
       scoreCandidates: async () => {
         throw new LlmScorerError('BAD_OUTPUT', 'x', { detail: { contentHead: 'BÍ MẬT' } });
       },
@@ -468,16 +603,98 @@ test('buildDependencies: thiếu cấu hình Qdrant ném NOT_CONFIGURED (không 
   );
 });
 
+test('buildDependencies: thiếu khoá embedding ném NOT_CONFIGURED, kể cả khi EMBEDDING_MOCK_MODE không đặt', () => {
+  assert.throws(
+    () => buildDependencies({ QDRANT_MOCK_MODE: 'true', LLM_MOCK_MODE: 'true' }),
+    (error: unknown) => error instanceof EmbeddingError && error.code === 'NOT_CONFIGURED',
+  );
+});
+
 test('buildDependencies: thiếu khoá/model chấm điểm ném NOT_CONFIGURED, kể cả khi LLM_MOCK_MODE không đặt', () => {
   assert.throws(
-    () => buildDependencies({ QDRANT_MOCK_MODE: 'true' }),
+    () => buildDependencies({ QDRANT_MOCK_MODE: 'true', EMBEDDING_MOCK_MODE: 'true' }),
     (error: unknown) => error instanceof LlmScorerError && error.code === 'NOT_CONFIGURED',
   );
 });
 
-test('buildDependencies: QDRANT_MOCK_MODE + LLM_MOCK_MODE chạy được và kho rỗng thì không có ứng viên', async () => {
-  const deps = buildDependencies({ QDRANT_MOCK_MODE: 'true', LLM_MOCK_MODE: 'true' }, () => {});
-  assert.deepEqual(await deps.findCandidates({ type: 'solutions', title: 't', content: 'c' }), []);
+test('buildDependencies: các chế độ mock chạy được; kho rỗng thì embed xong vẫn không có ứng viên', async () => {
+  const deps = buildDependencies(
+    { QDRANT_MOCK_MODE: 'true', LLM_MOCK_MODE: 'true', EMBEDDING_MOCK_MODE: 'true' },
+    () => {},
+  );
+  const input = { type: 'solutions' as const, title: 't', content: 'c' };
+  const vectors = await deps.embedInput(input);
+  assert.equal(vectors.length, 1);
+  assert.equal(vectors[0]!.length, DEFAULT_EMBEDDING_DIMENSIONS);
+  assert.deepEqual(await deps.findCandidates(input, { vectors, limit: 20 }), []);
+});
+
+test('buildDependencies: số chiều vector theo EMBEDDING_DIMENSIONS cho cả embedder lẫn kho (khớp worker)', async () => {
+  const env = {
+    QDRANT_MOCK_MODE: 'true',
+    LLM_MOCK_MODE: 'true',
+    EMBEDDING_MOCK_MODE: 'true',
+    EMBEDDING_DIMENSIONS: '8',
+  };
+  const deps = buildDependencies(env, () => {});
+  const stores = createVectorStoresFromEnv(env, 8);
+  await stores.forType('solutions').upsertChunks([
+    {
+      id: pointId('DIM-1', 0),
+      vector: [1, 0, 0, 0, 0, 0, 0, 0],
+      payload: {
+        ideaId: 'DIM-1',
+        type: 'solutions',
+        title: 'T',
+        chunkIndex: 0,
+        chunkCount: 1,
+        content: 'Báo cáo sự cố.',
+        metadata: {},
+        embeddingModel: 'mock-embedding',
+        indexedAt: '2026-11-04T00:00:00.000Z',
+      },
+    },
+  ]);
+  const input = { type: 'solutions' as const, title: 'Báo cáo sự cố', content: 'Báo cáo sự cố hiện trường.' };
+
+  const vectors = await deps.embedInput(input);
+
+  assert.equal(vectors[0]!.length, 8);
+  assert.deepEqual((await deps.findCandidates(input, { vectors, limit: 5 })).map((c) => c.id), ['DIM-1']);
+});
+
+test('buildDependencies: embedding thật thì kiểm model đã index; vector do model khác tạo bị từ chối thay vì xếp hạng sai', async () => {
+  const env = {
+    QDRANT_MOCK_MODE: 'true',
+    LLM_MOCK_MODE: 'true',
+    GEMINI_API_KEY: 'test-key',
+    EMBEDDING_MODEL: 'gemini-embedding-001',
+    EMBEDDING_DIMENSIONS: '4',
+  };
+  const deps = buildDependencies(env, () => {});
+  const stores = createVectorStoresFromEnv(env, 4);
+  await stores.forType('ideas').upsertChunks([
+    {
+      id: pointId('SEED-1', 0),
+      vector: [1, 0, 0, 0],
+      payload: {
+        ideaId: 'SEED-1',
+        type: 'ideas',
+        title: 'T',
+        chunkIndex: 0,
+        chunkCount: 1,
+        content: 'Sáng kiến mẫu.',
+        metadata: {},
+        embeddingModel: 'mock-embedding',
+        indexedAt: '2026-11-04T00:00:00.000Z',
+      },
+    },
+  ]);
+
+  await assert.rejects(
+    () => deps.findCandidates({ type: 'ideas', title: 't', content: 'c' }, { vectors: [[1, 0, 0, 0]], limit: 5 }),
+    (error: unknown) => error instanceof DedupError && error.code === 'CANDIDATES_UNAVAILABLE',
+  );
 });
 
 // --- type: ba collection riêng ---
@@ -485,7 +702,7 @@ test('buildDependencies: QDRANT_MOCK_MODE + LLM_MOCK_MODE chạy được và kh
 test('type ngoài ideas/solutions/initiatives trả 400 INVALID_INPUT và không đụng tới nguồn ứng viên hay model', async () => {
   let touched = 0;
   const deps: DedupDependencies = {
-    findCandidates: async () => {
+    embedInput: async () => [[1]], findCandidates: async () => {
       touched += 1;
       return [];
     },
@@ -507,7 +724,7 @@ test('type ngoài ideas/solutions/initiatives trả 400 INVALID_INPUT và không
 
 test('buildDependencies: mỗi type chỉ thấy dữ liệu trong collection của chính nó (kho dùng chung với worker inline)', async () => {
   const dimensions = DEFAULT_EMBEDDING_DIMENSIONS;
-  const env = { QDRANT_MOCK_MODE: 'true', LLM_MOCK_MODE: 'true' };
+  const env = { QDRANT_MOCK_MODE: 'true', LLM_MOCK_MODE: 'true', EMBEDDING_MOCK_MODE: 'true' };
   const deps = buildDependencies(env, () => {});
 
   // Ghi như worker: qua đúng kho theo type của bộ ba kho mock dùng chung trong tiến trình.
@@ -532,8 +749,11 @@ test('buildDependencies: mỗi type chỉ thấy dữ liệu trong collection c�
     ]);
   }
 
-  const idsFor = async (type: 'ideas' | 'solutions' | 'initiatives') =>
-    (await deps.findCandidates({ type, title: 't', content: 'c' })).map((candidate) => candidate.id);
+  const idsFor = async (type: 'ideas' | 'solutions' | 'initiatives') => {
+    const input = { type, title: 't', content: 'c' };
+    const vectors = await deps.embedInput(input);
+    return (await deps.findCandidates(input, { vectors, limit: 20 })).map((candidate) => candidate.id);
+  };
   assert.deepEqual(await idsFor('ideas'), ['ROUTE-ideas']);
   assert.deepEqual(await idsFor('initiatives'), ['ROUTE-initiatives']);
   assert.deepEqual(await idsFor('solutions'), [], 'solutions chưa có gì: không được thấy ideas hay initiatives');

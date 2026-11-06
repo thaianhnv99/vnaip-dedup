@@ -156,7 +156,7 @@ kết quả khi Core trả về:
 | `sub` của service account BE dùng để gọi tool qua Core | Cần lấy (xem cách bên dưới) | App điền vào `CHECK_DUPLICATES_ALLOWED_SUBS` |
 | `oid` của tổ chức VNAIP trong workspace Sota | **Đã có — BE cung cấp** | App điền vào `CHECK_DUPLICATES_ALLOWED_OIDS` |
 | `wid` của workspace Sota chứa app này | Cần lấy (xem cách bên dưới) | App điền vào `CHECK_DUPLICATES_ALLOWED_WIDS` |
-| Quy mô dữ liệu thật (số sáng kiến mỗi type) | Chưa có | App canh `CHECK_DUPLICATES_CANDIDATE_LIMIT` cho đủ, tránh `503 CANDIDATE_LIMIT_EXCEEDED` |
+| Quy mô dữ liệu thật (số sáng kiến mỗi type) | Chưa có | Không còn là ràng buộc cứng (tool chỉ chấm `k` sáng kiến gần nhất, `CHECK_DUPLICATES_TOP_K`, mặc định 20); số liệu dùng để đánh giá `k` đã đủ chưa |
 
 Giá trị `sub`/`oid`/`wid` thật lấy bằng cách: app bật tạm `LOG_VERIFIED_CLAIMS=true`,
 cho BE (hoặc agent đại diện BE) gọi tool thử 1 lần qua Core (dùng request Postman ở

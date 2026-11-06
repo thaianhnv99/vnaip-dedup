@@ -293,3 +293,119 @@ test("lazyEnsureCollections: mỗi type chỉ tạo collection một lần, lỗ
     (error: unknown) => error instanceof VectorStoreError && error.code === "INVALID_TYPE",
   );
 });
+
+// --- Tìm sáng kiến gần nhất (hướng B) ---
+
+function vec(ideaId: string, chunkIndex: number, vector: number[], overrides: Partial<VectorPoint["payload"]> = {}): VectorPoint {
+  return { ...makePoint(ideaId, chunkIndex, 2, overrides), vector };
+}
+
+test("searchIdeas xếp theo cosine giảm dần, mỗi sáng kiến một mục (chunk gần nhất), limit đếm sáng kiến", async () => {
+  const store = new InMemoryVectorStore(DIMS, "solutions");
+  await store.upsertChunks([
+    vec("A", 0, [0, 1, 0]),
+    vec("A", 1, [1, 0, 0], { embeddingModel: "model-gan-nhat" }), // chunk gần nhất của A
+    vec("B", 0, [0.8, 0.6, 0]),
+    vec("C", 0, [0, 0, 1]),
+  ]);
+
+  const hits = await store.searchIdeas({ vectors: [[1, 0, 0]], limit: 2 });
+
+  assert.deepEqual(hits.map((h) => h.ideaId), ["A", "B"]);
+  assert.equal(hits[0]!.score, 1);
+  assert.ok(Math.abs(hits[1]!.score - 0.8) < 1e-9);
+  assert.equal(hits[0]!.embeddingModel, "model-gan-nhat", "lấy nhãn model của chunk gần nhất");
+});
+
+test("searchIdeas không phụ thuộc độ dài vector (cosine, không phải tích vô hướng)", async () => {
+  const store = new InMemoryVectorStore(DIMS, "solutions");
+  await store.upsertChunks([vec("DAI", 0, [100, 0, 0]), vec("NGAN", 0, [0.1, 0.1, 0])]);
+
+  const hits = await store.searchIdeas({ vectors: [[1, 0, 0]], limit: 2 });
+
+  assert.deepEqual(hits.map((h) => [h.ideaId, Math.round(h.score * 1000) / 1000]), [["DAI", 1], ["NGAN", 0.707]]);
+});
+
+test("searchIdeas loại excludeIdeaIds trong truy vấn nên top-k vẫn đủ", async () => {
+  const store = new InMemoryVectorStore(DIMS, "solutions");
+  await store.upsertChunks([vec("A", 0, [1, 0, 0]), vec("B", 0, [0.9, 0.1, 0]), vec("C", 0, [0.5, 0.5, 0])]);
+
+  const hits = await store.searchIdeas({ vectors: [[1, 0, 0]], limit: 2, excludeIdeaIds: ["A"] });
+
+  assert.deepEqual(hits.map((h) => h.ideaId), ["B", "C"]);
+});
+
+test("searchIdeas nhiều vector truy vấn: lấy điểm cao nhất của mỗi sáng kiến rồi mới xếp hạng", async () => {
+  const store = new InMemoryVectorStore(DIMS, "solutions");
+  await store.upsertChunks([vec("X", 0, [1, 0, 0]), vec("Y", 0, [0, 1, 0]), vec("Z", 0, [0, 0, 1])]);
+
+  const hits = await store.searchIdeas({ vectors: [[1, 0, 0], [0, 1, 0]], limit: 3 });
+
+  assert.deepEqual(hits.map((h) => [h.ideaId, h.score]), [["X", 1], ["Y", 1], ["Z", 0]]);
+});
+
+test("searchIdeas trên kho rỗng trả mảng rỗng; vector không (norm 0) cho điểm 0 thay vì NaN", async () => {
+  const store = new InMemoryVectorStore(DIMS, "solutions");
+  assert.deepEqual(await store.searchIdeas({ vectors: [[1, 0, 0]], limit: 5 }), []);
+
+  await store.upsertChunks([vec("A", 0, [1, 0, 0])]);
+  const hits = await store.searchIdeas({ vectors: [[0, 0, 0]], limit: 5 });
+  assert.equal(hits[0]!.score, 0);
+});
+
+test("searchIdeas từ chối truy vấn sai: không vector, sai số chiều, giá trị không hữu hạn, limit không hợp lệ", async () => {
+  const store = new InMemoryVectorStore(DIMS, "solutions");
+  const bad = [
+    { vectors: [], limit: 5 },
+    { vectors: [[1, 0]], limit: 5 },
+    { vectors: [[1, 0, Number.NaN]], limit: 5 },
+    { vectors: [[1, 0, 0]], limit: 0 },
+    { vectors: [[1, 0, 0]], limit: 1.5 },
+    { vectors: [[1, 0, 0]], limit: 5, excludeIdeaIds: [""] },
+  ];
+  for (const options of bad) {
+    await assert.rejects(
+      () => store.searchIdeas(options),
+      (error: unknown) => error instanceof VectorStoreError && error.code === "BAD_REQUEST",
+      JSON.stringify(options),
+    );
+  }
+});
+
+test("searchIdeas chỉ tìm trong collection của chính type, không thấy type khác", async () => {
+  const stores = createInMemoryVectorStores(DIMS);
+  for (const type of RECORD_TYPES) {
+    await stores.forType(type).upsertChunks([vec(`only-${type}`, 0, [1, 0, 0], { type })]);
+  }
+
+  for (const type of RECORD_TYPES) {
+    const hits = await stores.forType(type).searchIdeas({ vectors: [[1, 0, 0]], limit: 10 });
+    assert.deepEqual(hits.map((h) => h.ideaId), [`only-${type}`]);
+  }
+});
+
+test("scrollIdeas chỉ trả chunk của các sáng kiến được nêu, sắp theo ideaId rồi chunkIndex; id lạ bị bỏ qua", async () => {
+  const store = new InMemoryVectorStore(DIMS, "solutions");
+  await store.upsertChunks([
+    makePoint("B", 1),
+    makePoint("A", 0),
+    makePoint("B", 0),
+    makePoint("C", 0, 1),
+  ]);
+
+  const { points, truncated } = await store.scrollIdeas(["B", "A", "khong-co"]);
+
+  assert.deepEqual(points.map(label), ["A#0", "B#0", "B#1"]);
+  assert.equal(truncated, false);
+});
+
+test("scrollIdeas báo truncated khi chạm maxPoints, và danh sách rỗng thì trả rỗng", async () => {
+  const store = new InMemoryVectorStore(DIMS, "solutions");
+  await store.upsertChunks([makePoint("A", 0), makePoint("A", 1)]);
+
+  const limited = await store.scrollIdeas(["A"], { maxPoints: 1 });
+  assert.equal(limited.points.length, 1);
+  assert.equal(limited.truncated, true);
+
+  assert.deepEqual(await store.scrollIdeas([]), { points: [], truncated: false });
+});

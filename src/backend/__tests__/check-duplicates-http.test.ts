@@ -22,8 +22,9 @@ let installBodyParsers: typeof import('../webhook-routes.js').installBodyParsers
 before(async () => {
   core = await setupFakeCore();
   process.env.SOTA_CORE_ORIGIN = core.origin;
-  // Đường dựng mặc định của handler dùng env này: kho trong bộ nhớ (rỗng) và scorer mock.
+  // Đường dựng mặc định của handler dùng env này: kho trong bộ nhớ (rỗng), embedding và scorer mock.
   process.env.QDRANT_MOCK_MODE = 'true';
+  process.env.EMBEDDING_MOCK_MODE = 'true';
   process.env.LLM_MOCK_MODE = 'true';
   ({ registerToolRoutes } = await import('../tool-routes.js'));
   ({ installBodyParsers } = await import('../webhook-routes.js'));

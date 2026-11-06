@@ -1,6 +1,6 @@
 manifestSchemaVersion: 3
 appId: vnaip-dedup
-version: 1.0.3
+version: 1.0.4
 displayName: "VNAIP Dedup"
 description: "Kiểm tra hồ sơ ứng viên tương tự trong hệ thống VNAIP."
 publisher:
@@ -14,15 +14,19 @@ contributes:
     - name: check-duplicates
       description: >-
         Kiểm tra mức độ tương đồng giữa một hồ sơ đầu vào (type là ideas,
-        solutions hoặc initiatives) và toàn bộ các sáng kiến CÙNG type đã được
-        duyệt và index trong VNAIP (có thể loại bớt bằng excludeIds). Không
-        bao giờ so sánh chéo giữa các type. Chỉ dành cho service account của
-        VNAIP BE; lời gọi từ người gọi khác bị từ chối (403).
+        solutions hoặc initiatives) và các sáng kiến CÙNG type đã được duyệt
+        và index trong VNAIP (có thể loại bớt bằng excludeIds). Không bao giờ
+        so sánh chéo giữa các type. Chỉ dành cho service account của VNAIP BE;
+        lời gọi từ người gọi khác bị từ chối (403).
+        Cách làm: embed hồ sơ đầu vào, dùng tìm kiếm vector để lọc ra một nhóm
+        nhỏ sáng kiến cùng type gần nhất (mặc định 20), rồi để model phân tích
+        nội dung đầy đủ và chấm điểm nhóm đó. Sáng kiến nằm ngoài nhóm gần nhất
+        không được chấm, nên một sáng kiến trùng ý nhưng diễn đạt rất khác có
+        thể không xuất hiện trong kết quả.
         Trả về tối đa 30 sáng kiến giống nhất đã được model chấm, mỗi mục có
         id, điểm số 0..1 (và percent 0..100) cùng lý do. Gọi tool này trước khi
-        tạo hồ sơ mới để tránh trùng lặp. Nếu kho sáng kiến vượt giới hạn so
-        sánh của tool thì trả lỗi thay vì kết quả thiếu. Caller chịu trách
-        nhiệm diễn giải điểm số; đây không phải kết luận trùng lặp cuối cùng.
+        tạo hồ sơ mới để tránh trùng lặp. Caller chịu trách nhiệm diễn giải
+        điểm số; đây không phải kết luận trùng lặp cuối cùng.
       route: POST /tools/check-duplicates
       inputSchema: src/schemas/dedup-input.schema.json
       outputSchema: src/schemas/dedup-output.schema.json

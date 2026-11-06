@@ -8,7 +8,7 @@ import {
   type RawModelMatch,
 } from '../dedup.js';
 
-const options = { candidateLimit: 30, deadlineMs: 5000 };
+const options = { topK: 30, deadlineMs: 5000 };
 
 const validInput = {
   type: 'solutions' as const,
@@ -22,6 +22,7 @@ function candidate(id: string, overrides: Partial<Candidate> = {}): Candidate {
 
 function deps(overrides: Partial<DedupDependencies>): DedupDependencies {
   return {
+    embedInput: async () => [[1, 0]],
     findCandidates: async () => [],
     scoreCandidates: async () => [],
     ...overrides,
@@ -51,9 +52,13 @@ test('input hợp lệ với candidate và percent hợp lệ trả về matches
   assert.equal(output.matches[1].score, 0.4);
 });
 
-test('type ngoài ideas/solutions/initiatives bị từ chối INVALID_INPUT và không đụng tới nguồn ứng viên hay model', async () => {
+test('type ngoài ideas/solutions/initiatives bị từ chối INVALID_INPUT và không đụng tới embedding, nguồn ứng viên hay model', async () => {
   let touched = 0;
   const spy = deps({
+    embedInput: async () => {
+      touched += 1;
+      return [[1, 0]];
+    },
     findCandidates: async () => {
       touched += 1;
       return [];
@@ -284,7 +289,7 @@ test('output bị cắt tối đa 30 kết quả theo percent cao nhất', async
       findCandidates: async () => candidates,
       scoreCandidates: async () => matches,
     }),
-    { candidateLimit: 100, deadlineMs: 5000 },
+    { topK: 100, deadlineMs: 5000 },
   );
 
   assert.equal(output.matches.length, 30);
@@ -340,39 +345,121 @@ test('loại excludeIds xong là hết ứng viên thì trả matches rỗng và
   assert.deepEqual(output.matches, []);
 });
 
-test('vượt trần ứng viên: báo CANDIDATE_LIMIT_EXCEEDED, KHÔNG cắt âm thầm và không gọi model', async () => {
+test('top-k: nguồn ứng viên trả nhiều hơn k thì chỉ k sáng kiến GẦN NHẤT (đầu danh sách) được gửi cho model, không báo lỗi', async () => {
+  let scored: string[] = [];
+  const output = await checkDuplicates(
+    validInput,
+    deps({
+      findCandidates: async () => Array.from({ length: 5 }, (_, i) => candidate(`c${i}`)),
+      scoreCandidates: async (_input, candidates) => {
+        scored = candidates.map((c) => c.id);
+        return candidates.map((c) => ({ id: c.id, percent: 50, reason: 'ok' }));
+      },
+    }),
+    { topK: 3, deadlineMs: 5000 },
+  );
+
+  assert.deepEqual(scored, ['c0', 'c1', 'c2'], 'giữ thứ hạng của nguồn: cắt đuôi là cắt các ứng viên xa nhất');
+  assert.equal(output.matches.length, 3);
+});
+
+test('top-k tính SAU khi loại excludeIds: id bị loại không chiếm chỗ của k', async () => {
+  let scored: string[] = [];
+  await checkDuplicates(
+    { ...validInput, excludeIds: ['c0'] },
+    deps({
+      // Nguồn không biết excludeIds (adapter lỏng): dedup vẫn phải loại rồi mới cắt k.
+      findCandidates: async () => Array.from({ length: 4 }, (_, i) => candidate(`c${i}`)),
+      scoreCandidates: async (_input, candidates) => {
+        scored = candidates.map((c) => c.id);
+        return [];
+      },
+    }),
+    { topK: 3, deadlineMs: 5000 },
+  );
+
+  assert.deepEqual(scored, ['c1', 'c2', 'c3']);
+});
+
+test('bước embed chạy TRƯỚC khi tìm ứng viên; findCandidates nhận đúng input, vector và k', async () => {
+  const order: string[] = [];
+  const vectors = [[1, 0], [0, 1]];
+  let received: { input?: unknown; query?: unknown } = {};
+  await checkDuplicates(
+    { ...validInput, excludeIds: ['x'] },
+    deps({
+      embedInput: async (input) => {
+        order.push('embed');
+        assert.equal(input.title, validInput.title);
+        return vectors;
+      },
+      findCandidates: async (input, query) => {
+        order.push('find');
+        received = { input, query };
+        return [];
+      },
+      scoreCandidates: async () => {
+        order.push('score');
+        return [];
+      },
+    }),
+    { topK: 7, deadlineMs: 5000 },
+  );
+
+  assert.deepEqual(order, ['embed', 'find']);
+  assert.deepEqual(received.query, { vectors, limit: 7 });
+  assert.deepEqual((received.input as { excludeIds?: string[] }).excludeIds, ['x'], 'nguồn phải thấy excludeIds để loại ngay trong truy vấn');
+});
+
+test('embedding lỗi: propagate EMBEDDING_UNAVAILABLE, không tìm ứng viên, không gọi model, không trả matches rỗng im lặng', async () => {
+  let touched = 0;
   await assert.rejects(
     () =>
       checkDuplicates(
         validInput,
         deps({
-          findCandidates: async () => Array.from({ length: 4 }, (_, i) => candidate(`c${i}`)),
+          embedInput: async () => {
+            throw new Error('gemini 429');
+          },
+          findCandidates: async () => {
+            touched += 1;
+            return [];
+          },
           scoreCandidates: async () => {
-            throw new Error('không nên được gọi khi vượt trần');
+            touched += 1;
+            return [];
           },
         }),
-        { candidateLimit: 3, deadlineMs: 5000 },
+        options,
       ),
     (error: unknown) => {
       assert.ok(error instanceof DedupError);
-      assert.equal(error.code, 'CANDIDATE_LIMIT_EXCEEDED');
+      assert.equal(error.code, 'EMBEDDING_UNAVAILABLE');
+      assert.match(String((error.cause as Error).message), /gemini 429/);
       return true;
     },
   );
+  assert.equal(touched, 0);
 });
 
-test('đúng bằng trần thì vẫn chấm; trần tính SAU khi loại excludeIds', async () => {
-  const output = await checkDuplicates(
-    { ...validInput, excludeIds: ['c3'] },
-    deps({
-      findCandidates: async () => Array.from({ length: 4 }, (_, i) => candidate(`c${i}`)),
-      scoreCandidates: async (_input, candidates) =>
-        candidates.map((c) => ({ id: c.id, percent: 50, reason: 'ok' })),
-    }),
-    { candidateLimit: 3, deadlineMs: 5000 },
+test('embedding trả danh sách vector rỗng cũng là EMBEDDING_UNAVAILABLE (không tìm với truy vấn rỗng)', async () => {
+  let found = 0;
+  await assert.rejects(
+    () =>
+      checkDuplicates(
+        validInput,
+        deps({
+          embedInput: async () => [],
+          findCandidates: async () => {
+            found += 1;
+            return [];
+          },
+        }),
+        options,
+      ),
+    (error: unknown) => error instanceof DedupError && error.code === 'EMBEDDING_UNAVAILABLE',
   );
-
-  assert.equal(output.matches.length, 3);
+  assert.equal(found, 0);
 });
 
 test('DedupError từ nguồn ứng viên (vượt giới hạn đọc) được giữ nguyên mã, không bị gói thành CANDIDATES_UNAVAILABLE', async () => {
@@ -407,7 +494,7 @@ test('scoreCandidates nhận deadlineAt tính từ deadlineMs của lời gọi'
         return [];
       },
     }),
-    { candidateLimit: 30, deadlineMs: 4000 },
+    { topK: 30, deadlineMs: 4000 },
   );
   const after = Date.now();
 

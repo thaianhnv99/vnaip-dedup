@@ -403,18 +403,58 @@ test("chấp nhận JSON bọc trong code fence; bỏ qua mục thừa sai đị
 
 test("ứng viên thiếu mục chấm điểm dùng được thì cả batch là BAD_OUTPUT, không thành 'không trùng' im lặng", async () => {
   const good = { id: "c000", percent: 80, reason: "giống" };
-  const cases: Array<{ name: string; matches: unknown[]; scoredCount: number }> = [
-    { name: "model bỏ sót ứng viên", matches: [good], scoredCount: 1 },
-    { name: "percent là chuỗi", matches: [good, { id: "c001", percent: "85", reason: "x" }], scoredCount: 1 },
-    { name: "percent là số lẻ", matches: [good, { id: "c001", percent: 85.5, reason: "x" }], scoredCount: 1 },
-    { name: "percent ngoài 0..100", matches: [good, { id: "c001", percent: 120, reason: "x" }], scoredCount: 1 },
-    { name: "reason thiếu", matches: [good, { id: "c001", percent: 85 }], scoredCount: 1 },
-    { name: "reason chỉ có khoảng trắng", matches: [good, { id: "c001", percent: 85, reason: "  " }], scoredCount: 1 },
-    { name: "id không thuộc batch", matches: [good, { id: "c999", percent: 85, reason: "x" }], scoredCount: 1 },
-    { name: "mục trùng id không bù được ứng viên khác", matches: [good, good], scoredCount: 1 },
-    { name: "mảng matches rỗng", matches: [], scoredCount: 0 },
+  // Mỗi trường hợp phải ra ĐÚNG số đếm nguyên nhân của nó: log dựa vào đây để phân biệt model bỏ
+  // sót, sai id, percent không hợp lệ... mà không cần nội dung.
+  type Counts = Partial<{
+    scoredCount: number;
+    entryCount: number;
+    malformedCount: number;
+    unknownIdCount: number;
+    duplicateCount: number;
+    percentNotIntegerCount: number;
+    percentOutOfRangeCount: number;
+    reasonBlankCount: number;
+  }>;
+  const cases: Array<{ name: string; matches: unknown[]; counts: Counts }> = [
+    { name: "model bỏ sót ứng viên", matches: [good], counts: { scoredCount: 1, entryCount: 1 } },
+    {
+      name: "percent là chuỗi",
+      matches: [good, { id: "c001", percent: "85", reason: "x" }],
+      counts: { scoredCount: 1, entryCount: 2, malformedCount: 1 },
+    },
+    {
+      name: "percent là số lẻ",
+      matches: [good, { id: "c001", percent: 85.5, reason: "x" }],
+      counts: { scoredCount: 1, entryCount: 2, percentNotIntegerCount: 1 },
+    },
+    {
+      name: "percent ngoài 0..100",
+      matches: [good, { id: "c001", percent: 120, reason: "x" }],
+      counts: { scoredCount: 1, entryCount: 2, percentOutOfRangeCount: 1 },
+    },
+    {
+      name: "reason thiếu",
+      matches: [good, { id: "c001", percent: 85 }],
+      counts: { scoredCount: 1, entryCount: 2, malformedCount: 1 },
+    },
+    {
+      name: "reason chỉ có khoảng trắng",
+      matches: [good, { id: "c001", percent: 85, reason: "  " }],
+      counts: { scoredCount: 1, entryCount: 2, reasonBlankCount: 1 },
+    },
+    {
+      name: "id không thuộc batch",
+      matches: [good, { id: "c999", percent: 85, reason: "x" }],
+      counts: { scoredCount: 1, entryCount: 2, unknownIdCount: 1 },
+    },
+    {
+      name: "mục trùng id không bù được ứng viên khác",
+      matches: [good, good],
+      counts: { scoredCount: 1, entryCount: 2, duplicateCount: 1 },
+    },
+    { name: "mảng matches rỗng", matches: [], counts: {} },
   ];
-  for (const { name, matches, scoredCount } of cases) {
+  for (const { name, matches, counts } of cases) {
     const server = await startFakeServer(() => chatContent(JSON.stringify({ matches })));
     try {
       await assert.rejects(
@@ -424,7 +464,19 @@ test("ứng viên thiếu mục chấm điểm dùng được thì cả batch l�
           assert.equal(error.code, "BAD_OUTPUT", name);
           assert.deepEqual(
             error.detail,
-            { reason: "incomplete_scores", expectedCount: 2, scoredCount },
+            {
+              reason: "incomplete_scores",
+              expectedCount: 2,
+              scoredCount: 0,
+              entryCount: 0,
+              malformedCount: 0,
+              unknownIdCount: 0,
+              duplicateCount: 0,
+              percentNotIntegerCount: 0,
+              percentOutOfRangeCount: 0,
+              reasonBlankCount: 0,
+              ...counts,
+            },
             name,
           );
           return true;

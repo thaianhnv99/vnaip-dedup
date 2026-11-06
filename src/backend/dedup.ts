@@ -58,6 +58,7 @@ export interface RawModelMatch {
 export class DedupError extends Error {
   readonly code:
     | "INVALID_INPUT"
+    | "EMBEDDING_UNAVAILABLE"
     | "CANDIDATES_UNAVAILABLE"
     | "CANDIDATE_LIMIT_EXCEEDED"
     | "SCORING_UNAVAILABLE";
@@ -88,13 +89,22 @@ export interface ScoreOptions {
  */
 export interface DedupDependencies {
   /**
-   * Trả MỌI sáng kiến của ĐÚNG `input.type` (hướng A, không tìm theo vector), đọc
-   * từ collection riêng của type đó. Không được đọc collection của type khác rồi
-   * lọc lại. Phải ném lỗi khi không đọc được hết dữ liệu; không bao giờ trả danh
-   * sách bị cắt như thể đầy đủ.
+   * Bước 1: embed input thành các vector truy vấn, mỗi vector một đoạn nội dung (hồ sơ
+   * dài được chia đoạn như lúc index). Phải dùng đúng embedding model đã dùng khi index.
    */
-  findCandidates(input: DedupInput): Promise<Candidate[]>;
+  embedInput(input: DedupInput): Promise<number[][]>;
 
+  /**
+   * Bước 2: trả tối đa `query.limit` sáng kiến của ĐÚNG `input.type` gần `query.vectors`
+   * nhất (hướng B, tìm theo vector), xếp theo độ gần GIẢM DẦN, kèm nội dung đầy đủ để
+   * model chấm. Đọc từ collection riêng của type đó, không được đọc collection của type
+   * khác rồi lọc lại, và phải loại `input.excludeIds` ngay trong truy vấn để các id đó
+   * không chiếm chỗ của `limit`. Phải ném lỗi khi không truy vấn được; không bao giờ coi
+   * lỗi là "không có ứng viên".
+   */
+  findCandidates(input: DedupInput, query: CandidateQuery): Promise<Candidate[]>;
+
+  /** Bước 3: model đọc nội dung các ứng viên đã lọc rồi chấm mức tương đồng. */
   scoreCandidates(
     input: DedupInput,
     candidates: Candidate[],
@@ -102,15 +112,23 @@ export interface DedupDependencies {
   ): Promise<RawModelMatch[]>;
 }
 
+/** Truy vấn tìm ứng viên theo vector. */
+export interface CandidateQuery {
+  /** Vector truy vấn của input (từ `embedInput`), ít nhất một vector. */
+  vectors: number[][];
+  /** Số sáng kiến tối đa cần trả về (top-k). */
+  limit: number;
+}
+
 export interface CheckDuplicatesOptions {
   /**
-   * Số sáng kiến tối đa (sau khi loại `excludeIds`) được gửi cho model. Vượt trần
-   * thì báo lỗi CANDIDATE_LIMIT_EXCEEDED thay vì cắt: cắt tuỳ ý (không có độ
-   * tương đồng để xếp hạng) có thể bỏ sót đúng sáng kiến trùng và trả "không
-   * trùng" sai. Chạm trần là tín hiệu để chuyển sang hướng B (top-k theo vector).
+   * k của top-k: số sáng kiến gần input nhất (sau khi loại `excludeIds`) được gửi cho
+   * model. Vector chỉ dùng để RÚT GỌN tập ứng viên; sáng kiến trùng thật nhưng diễn đạt
+   * khác nhiều có thể nằm ngoài top-k và không bao giờ được model thấy, nên k là đánh
+   * đổi giữa chi phí/độ trễ và nguy cơ bỏ sót (xem README, mục "Hành vi cần biết").
    */
-  candidateLimit: number;
-  /** Tổng thời gian cho cả lời gọi (lấy ứng viên + chấm điểm), nhỏ hơn timeoutMs của tool. */
+  topK: number;
+  /** Tổng thời gian cho cả lời gọi (embed + tìm ứng viên + chấm điểm), nhỏ hơn timeoutMs của tool. */
   deadlineMs: number;
 }
 
@@ -128,11 +146,31 @@ export async function checkDuplicates(
 
   const deadlineAt = Date.now() + options.deadlineMs;
 
-  // Bước 1: lấy ứng viên. Nếu adapter lỗi, lỗi phải propagate — không bao giờ biến
-  // lỗi lấy ứng viên thành "không có hồ sơ trùng".
+  // Bước 1: embed input. Lỗi embedding cũng phải propagate: không có vector thì không
+  // thể lọc ứng viên, và không được coi đó là "không có hồ sơ trùng".
+  let vectors: number[][];
+  try {
+    vectors = await deps.embedInput(input);
+  } catch (error) {
+    if (error instanceof DedupError) throw error;
+    throw new DedupError(
+      "EMBEDDING_UNAVAILABLE",
+      "Không tạo được embedding cho hồ sơ đầu vào",
+      { cause: error },
+    );
+  }
+  if (!Array.isArray(vectors) || vectors.length === 0) {
+    throw new DedupError(
+      "EMBEDDING_UNAVAILABLE",
+      "Embedding của hồ sơ đầu vào rỗng",
+    );
+  }
+
+  // Bước 2: tìm top-k ứng viên gần nhất theo vector. Nếu adapter lỗi, lỗi phải
+  // propagate — không bao giờ biến lỗi lấy ứng viên thành "không có hồ sơ trùng".
   let found: Candidate[];
   try {
-    found = await deps.findCandidates(input);
+    found = await deps.findCandidates(input, { vectors, limit: options.topK });
   } catch (error) {
     if (error instanceof DedupError) throw error;
     throw new DedupError(
@@ -153,22 +191,19 @@ export async function checkDuplicates(
     );
   }
 
-  // Loại excludeIds ở đây (quy tắc nghiệp vụ) để không phụ thuộc adapter có làm hay không.
+  // Loại excludeIds ở đây (quy tắc nghiệp vụ) để không phụ thuộc adapter có làm hay không,
+  // rồi giữ đúng top-k: danh sách đã xếp theo độ gần nên cắt đuôi là cắt các ứng viên xa
+  // nhất (khác với hướng A cũ, nơi cắt tuỳ ý có thể bỏ sót đúng sáng kiến trùng).
   const excluded = new Set(input.excludeIds ?? []);
-  const candidates = found.filter((candidate) => !excluded.has(candidate.id));
-
-  if (candidates.length > options.candidateLimit) {
-    throw new DedupError(
-      "CANDIDATE_LIMIT_EXCEEDED",
-      "Số sáng kiến cần so sánh vượt trần cho phép",
-    );
-  }
+  const candidates = found
+    .filter((candidate) => !excluded.has(candidate.id))
+    .slice(0, options.topK);
 
   if (candidates.length === 0) {
     return { matches: [] };
   }
 
-  // Bước 2: model chấm mức tương đồng.
+  // Bước 3: model chấm mức tương đồng trên nội dung đầy đủ của nhóm ứng viên đã lọc.
   let rawMatches: RawModelMatch[];
   try {
     rawMatches = await deps.scoreCandidates(input, candidates, { deadlineAt });
@@ -180,7 +215,7 @@ export async function checkDuplicates(
     );
   }
 
-  // Bước 3: chỉ chấp nhận ID thuộc tập ứng viên.
+  // Bước 4: chỉ chấp nhận ID thuộc tập ứng viên.
   const candidatesById = new Map(
     candidates.map((candidate) => [candidate.id, candidate]),
   );

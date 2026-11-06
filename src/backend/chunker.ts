@@ -2,8 +2,9 @@
  * Chia văn bản dài thành các chunk để embedding.
  *
  * Ưu tiên cắt theo đoạn (dòng trống), rồi theo khoảng trắng, cuối cùng mới cắt
- * cứng. Không chồng lấp (overlap): luồng 1 theo hướng A không tìm theo vector,
- * chunk được gom lại theo ideaId. Thêm overlap nếu sau này chuyển sang top-k.
+ * cứng. Không chồng lấp (overlap): chunk chỉ để tìm sáng kiến gần input theo vector, rồi
+ * được gom lại theo ideaId để model đọc nội dung đầy đủ. Luồng truy vấn (input-embedder.ts)
+ * dùng đúng hàm này nên thêm overlap phải đi cùng việc index lại toàn bộ.
  *
  * text-embedding-3-small nhận tối đa 8191 token mỗi đầu vào; 2000 ký tự tiếng
  * Việt còn xa mức đó.

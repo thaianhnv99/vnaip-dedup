@@ -75,6 +75,16 @@ export class EmbeddingError extends Error {
 /** Biến văn bản thành vector, giữ nguyên thứ tự đầu vào. */
 export type Embedder = (texts: string[]) => Promise<number[][]>;
 
+/**
+ * Văn bản đưa vào embedding cho MỘT đoạn nội dung: tiêu đề + đoạn, để đoạn nào cũng giữ
+ * ngữ cảnh của cả hồ sơ. Luồng index (index-job.ts) và luồng truy vấn kiểm tra trùng
+ * (input-embedder.ts) PHẢI dùng cùng hàm này: lệch định dạng thì vector truy vấn và
+ * vector đã index không còn so sánh công bằng được.
+ */
+export function embeddingText(title: string, chunk: string): string {
+  return `${title}\n\n${chunk}`;
+}
+
 function positiveInteger(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;

@@ -318,9 +318,18 @@ async function scoreBatch(
     );
   }
 
-  const matches = parseModelOutput(body);
-  assertBatchCovered(matches, batch);
-  return matches;
+  const output = parseModelOutput(body);
+  assertBatchCovered(output, batch);
+  return output.matches;
+}
+
+/** Output đã parse của model, kèm số mục bị loại vì sai hình dạng (để chẩn đoán). */
+interface ParsedModelOutput {
+  matches: RawModelMatch[];
+  /** Số phần tử model trả trong `matches[]`, tính cả phần tử sai hình dạng. */
+  entryCount: number;
+  /** Số phần tử bị loại vì không phải object, thiếu id/percent/reason hoặc sai kiểu. */
+  malformedCount: number;
 }
 
 /**
@@ -330,12 +339,31 @@ async function scoreBatch(
  * dù có thể là sáng kiến trùng thật. Nên coi cả batch là BAD_OUTPUT, cùng nguyên tắc
  * "một batch lỗi thì cả lời gọi lỗi" ở đầu file. Mục thừa (id không thuộc batch) vẫn
  * được bỏ qua ở `checkDuplicates()`.
+ *
+ * `detail` chỉ chứa SỐ ĐẾM theo từng nguyên nhân (không có id, percent hay reason nào) để log
+ * cho biết model bỏ sót, sai id, trả percent không hợp lệ hay trùng mục, mà không lộ nội dung.
+ * Cách đọc: `entryCount` = `malformedCount` + số mục đã phân loại; ứng viên không có mục nào
+ * hợp lệ và không thuộc các đếm còn lại nghĩa là model bỏ sót nó.
  */
-function assertBatchCovered(matches: RawModelMatch[], batch: Candidate[]): void {
+function assertBatchCovered(output: ParsedModelOutput, batch: Candidate[]): void {
   const batchIds = new Set(batch.map((candidate) => candidate.id));
   const scored = new Set<string>();
-  for (const match of matches) {
-    if (batchIds.has(match.id) && isUsableScore(match)) scored.add(match.id);
+  let unknownIdCount = 0;
+  let duplicateCount = 0;
+  let percentNotIntegerCount = 0;
+  let percentOutOfRangeCount = 0;
+  let reasonBlankCount = 0;
+  for (const match of output.matches) {
+    if (!batchIds.has(match.id)) {
+      unknownIdCount++;
+      continue;
+    }
+    const problem = scoreProblem(match);
+    if (problem === "percent_not_integer") percentNotIntegerCount++;
+    else if (problem === "percent_out_of_range") percentOutOfRangeCount++;
+    else if (problem === "reason_blank") reasonBlankCount++;
+    else if (scored.has(match.id)) duplicateCount++;
+    else scored.add(match.id);
   }
   if (scored.size < batchIds.size) {
     throw new LlmScorerError(
@@ -346,20 +374,27 @@ function assertBatchCovered(matches: RawModelMatch[], batch: Candidate[]): void 
           reason: "incomplete_scores",
           expectedCount: batchIds.size,
           scoredCount: scored.size,
+          entryCount: output.entryCount,
+          malformedCount: output.malformedCount,
+          unknownIdCount,
+          duplicateCount,
+          percentNotIntegerCount,
+          percentOutOfRangeCount,
+          reasonBlankCount,
         },
       },
     );
   }
 }
 
-/** Phải khớp điều kiện chấp nhận một mục ở `checkDuplicates()` (dedup.ts). */
-function isUsableScore(match: RawModelMatch): boolean {
-  return (
-    Number.isInteger(match.percent) &&
-    match.percent >= 0 &&
-    match.percent <= 100 &&
-    match.reason.trim().length > 0
-  );
+/** Lý do một mục không dùng được; `undefined` nghĩa là dùng được. Phải khớp `checkDuplicates()` (dedup.ts). */
+function scoreProblem(
+  match: RawModelMatch,
+): "percent_not_integer" | "percent_out_of_range" | "reason_blank" | undefined {
+  if (!Number.isInteger(match.percent)) return "percent_not_integer";
+  if (match.percent < 0 || match.percent > 100) return "percent_out_of_range";
+  if (match.reason.trim().length === 0) return "reason_blank";
+  return undefined;
 }
 
 /**
@@ -367,7 +402,7 @@ function isUsableScore(match: RawModelMatch): boolean {
  * sai đều bị coi là BAD_OUTPUT — checkDuplicates() ở lớp trên sẽ lọc tiếp
  * theo id/percent hợp lệ và id có thuộc danh sách candidate hay không.
  */
-function parseModelOutput(body: unknown): RawModelMatch[] {
+function parseModelOutput(body: unknown): ParsedModelOutput {
   const content = extractChatContent(body);
   if (content === null) {
     throw new LlmScorerError("BAD_OUTPUT", "Response của model thiếu nội dung chat", {
@@ -407,6 +442,7 @@ function parseModelOutput(body: unknown): RawModelMatch[] {
   }
 
   const matches: RawModelMatch[] = [];
+  let malformedCount = 0;
   for (const raw of parsed.matches) {
     if (
       isRecord(raw) &&
@@ -418,12 +454,14 @@ function parseModelOutput(body: unknown): RawModelMatch[] {
       // type/score luôn được gán lại/suy ra ở checkDuplicates() (score =
       // percent / 100); percent là giá trị chuẩn duy nhất tin dùng từ model.
       matches.push({ id: raw.id, percent: raw.percent, reason: raw.reason });
+    } else {
+      // Entry sai kiểu bị bỏ qua ở đây (chỉ đếm); scoreBatch() sẽ báo BAD_OUTPUT nếu vì vậy
+      // mà một ứng viên của batch không còn mục chấm điểm dùng được (assertBatchCovered).
+      malformedCount++;
     }
-    // Entry sai kiểu bị bỏ qua ở đây; scoreBatch() sẽ báo BAD_OUTPUT nếu vì vậy mà
-    // một ứng viên của batch không còn mục chấm điểm dùng được (assertBatchCovered).
   }
 
-  return matches;
+  return { matches, entryCount: parsed.matches.length, malformedCount };
 }
 
 /** Một số model bọc JSON trong ```json ... ``` dù đã yêu cầu json_object. */

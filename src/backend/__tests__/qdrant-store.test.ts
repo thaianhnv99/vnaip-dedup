@@ -488,3 +488,207 @@ test("QDRANT_MOCK_MODE=true dùng kho trong bộ nhớ, mỗi type một kho ri�
     (error: unknown) => error instanceof VectorStoreError && error.code === "NOT_CONFIGURED",
   );
 });
+
+// --- Tìm sáng kiến gần nhất (hướng B) ---
+
+const group = (ideaId: string, score: number, embeddingModel = "gemini-embedding-001") => ({
+  id: ideaId,
+  hits: [{ id: pointId(ideaId, 0), version: 3, score, payload: { embeddingModel } }],
+});
+
+test("searchIdeas gọi query/groups nhóm theo ideaId, chỉ kéo embeddingModel, và không có filter khi không loại id", async () => {
+  const server = await startFakeServer(() => ({
+    status: 200,
+    json: { result: { groups: [group("GP-1", 0.93), group("GP-2", 0.71)] } },
+  }));
+  try {
+    const hits = await new QdrantVectorStore(configFor(server.origin)).searchIdeas({
+      vectors: [[1, 0, 0]],
+      limit: 20,
+    });
+
+    assert.deepEqual(hits, [
+      { ideaId: "GP-1", score: 0.93, embeddingModel: "gemini-embedding-001" },
+      { ideaId: "GP-2", score: 0.71, embeddingModel: "gemini-embedding-001" },
+    ]);
+    assert.equal(server.requests.length, 1);
+    const request = server.requests[0]!;
+    assert.equal(request.method, "POST");
+    assert.equal(request.url, "/collections/vnaip_dedup_test/points/query/groups");
+    assert.equal(request.headers["api-key"], API_KEY);
+    assert.deepEqual(request.body, {
+      query: [1, 0, 0],
+      group_by: "ideaId",
+      group_size: 1,
+      limit: 20,
+      with_payload: ["embeddingModel"],
+      with_vector: false,
+    });
+  } finally {
+    await server.close();
+  }
+});
+
+test("searchIdeas đưa excludeIdeaIds vào must_not của chính truy vấn", async () => {
+  const server = await startFakeServer(() => ({ status: 200, json: { result: { groups: [] } } }));
+  try {
+    await new QdrantVectorStore(configFor(server.origin)).searchIdeas({
+      vectors: [[1, 0, 0]],
+      limit: 5,
+      excludeIdeaIds: ["GP-1", "GP-9"],
+    });
+
+    assert.deepEqual(server.requests[0]!.body.filter, {
+      must_not: [{ key: "ideaId", match: { any: ["GP-1", "GP-9"] } }],
+    });
+  } finally {
+    await server.close();
+  }
+});
+
+test("searchIdeas với nhiều vector: mỗi vector một request, gộp theo điểm cao nhất rồi cắt còn limit", async () => {
+  const byQuery: Record<string, unknown[]> = {
+    "1,0,0": [group("A", 0.9), group("B", 0.4)],
+    "0,1,0": [group("B", 0.95), group("C", 0.5)],
+  };
+  const server = await startFakeServer((request) => ({
+    status: 200,
+    json: { result: { groups: byQuery[request.body.query.join(",")] } },
+  }));
+  try {
+    const hits = await new QdrantVectorStore(configFor(server.origin)).searchIdeas({
+      vectors: [[1, 0, 0], [0, 1, 0]],
+      limit: 2,
+    });
+
+    assert.equal(server.requests.length, 2);
+    assert.deepEqual(hits.map((h) => [h.ideaId, h.score]), [["B", 0.95], ["A", 0.9]]);
+  } finally {
+    await server.close();
+  }
+});
+
+test("searchIdeas trên collection rỗng trả mảng rỗng", async () => {
+  const server = await startFakeServer(() => ({ status: 200, json: { result: { groups: [] } } }));
+  try {
+    assert.deepEqual(
+      await new QdrantVectorStore(configFor(server.origin)).searchIdeas({ vectors: [[1, 0, 0]], limit: 5 }),
+      [],
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("searchIdeas từ chối response sai định dạng (BAD_RESPONSE), không coi là kết quả rỗng", async () => {
+  const malformed: unknown[] = [
+    { result: {} },
+    { result: { groups: "x" } },
+    { result: { groups: [{ id: 7, hits: [{ score: 1, payload: { embeddingModel: "m" } }] }] } },
+    { result: { groups: [{ id: "A", hits: [] }] } },
+    { result: { groups: [{ id: "A", hits: [{ score: "cao", payload: { embeddingModel: "m" } }] }] } },
+    { result: { groups: [{ id: "A", hits: [{ score: 1, payload: {} }] }] } },
+  ];
+  for (const json of malformed) {
+    const server = await startFakeServer(() => ({ status: 200, json }));
+    try {
+      await assert.rejects(
+        () => new QdrantVectorStore(configFor(server.origin)).searchIdeas({ vectors: [[1, 0, 0]], limit: 5 }),
+        (error: unknown) => error instanceof VectorStoreError && error.code === "BAD_RESPONSE",
+        JSON.stringify(json),
+      );
+    } finally {
+      await server.close();
+    }
+  }
+});
+
+test("searchIdeas phân loại lỗi HTTP như các thao tác khác và không lộ API key", async () => {
+  const cases: Array<[number, string, boolean]> = [
+    [401, "AUTH_ERROR", false],
+    [500, "UPSTREAM_ERROR", true],
+  ];
+  for (const [status, code, retryable] of cases) {
+    const server = await startFakeServer(() => ({ status }));
+    try {
+      await assert.rejects(
+        () => new QdrantVectorStore(configFor(server.origin)).searchIdeas({ vectors: [[1, 0, 0]], limit: 5 }),
+        (error: unknown) => {
+          assert.ok(error instanceof VectorStoreError);
+          assert.equal(error.code, code);
+          assert.equal(error.retryable, retryable);
+          assert.doesNotMatch(error.message, new RegExp(API_KEY));
+          return true;
+        },
+      );
+    } finally {
+      await server.close();
+    }
+  }
+});
+
+test("searchIdeas kiểm tham số trước khi gọi mạng (sai số chiều, limit)", async () => {
+  const server = await startFakeServer(() => ({ status: 200, json: { result: { groups: [] } } }));
+  try {
+    const store = new QdrantVectorStore(configFor(server.origin));
+    for (const options of [
+      { vectors: [[1, 0]], limit: 5 },
+      { vectors: [], limit: 5 },
+      { vectors: [[1, 0, 0]], limit: 0 },
+    ]) {
+      await assert.rejects(
+        () => store.searchIdeas(options),
+        (error: unknown) => error instanceof VectorStoreError && error.code === "BAD_REQUEST",
+      );
+    }
+    assert.equal(server.requests.length, 0);
+  } finally {
+    await server.close();
+  }
+});
+
+test("scrollIdeas lọc theo ideaId bằng match.any, phân trang, và không gửi request khi danh sách rỗng", async () => {
+  const pages = [
+    { points: [{ id: "p1", payload: storedPayload("GP-1") }], next_page_offset: "p2" },
+    { points: [{ id: "p2", payload: storedPayload("GP-2") }], next_page_offset: null },
+  ];
+  const server = await startFakeServer((_request, index) => ({ status: 200, json: { result: pages[index] } }));
+  try {
+    const store = new QdrantVectorStore(configFor(server.origin));
+
+    assert.deepEqual(await store.scrollIdeas([]), { points: [], truncated: false });
+    assert.equal(server.requests.length, 0);
+
+    const result = await store.scrollIdeas(["GP-1", "GP-2"]);
+
+    assert.deepEqual(result.points.map((point) => point.payload.ideaId), ["GP-1", "GP-2"]);
+    assert.equal(result.truncated, false);
+    for (const request of server.requests) {
+      assert.equal(request.url, "/collections/vnaip_dedup_test/points/scroll");
+      assert.deepEqual(request.body.filter, { must: [{ key: "ideaId", match: { any: ["GP-1", "GP-2"] } }] });
+      assert.equal(request.body.with_vector, false);
+    }
+    assert.equal(server.requests[1]!.body.offset, "p2");
+  } finally {
+    await server.close();
+  }
+});
+
+test("scrollIdeas báo truncated khi chạm maxPoints và từ chối ideaId rỗng", async () => {
+  const server = await startFakeServer(() => ({
+    status: 200,
+    json: { result: { points: [{ id: "p1", payload: storedPayload() }], next_page_offset: "p2" } },
+  }));
+  try {
+    const store = new QdrantVectorStore(configFor(server.origin));
+    const result = await store.scrollIdeas(["GP-1"], { maxPoints: 1 });
+    assert.equal(result.truncated, true);
+
+    await assert.rejects(
+      () => store.scrollIdeas([""]),
+      (error: unknown) => error instanceof VectorStoreError && error.code === "BAD_REQUEST",
+    );
+  } finally {
+    await server.close();
+  }
+});

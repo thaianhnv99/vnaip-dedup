@@ -4,10 +4,14 @@ import {
   VectorStoreSet,
   assertChunkRange,
   assertIdeaId,
+  assertSearchOptions,
   assertValidPoint,
   createInMemoryVectorStores,
+  mergeHits,
   type IdeaChunkPayload,
+  type IdeaHit,
   type ScrollResult,
+  type SearchIdeasOptions,
   type StoredChunk,
   type VectorPoint,
   type VectorStore,
@@ -235,8 +239,65 @@ export class QdrantVectorStore implements VectorStore {
     }
   }
 
+  /**
+   * Top sáng kiến gần nhất bằng Query API nhóm theo `ideaId` (Qdrant >= 1.11): mỗi sáng
+   * kiến chỉ xuất hiện một lần dù nhiều chunk cùng gần, nên `limit` đếm sáng kiến chứ
+   * không đếm chunk. Mỗi vector truy vấn một request, chạy song song rồi gộp theo điểm
+   * cao nhất. `excludeIdeaIds` đi vào `must_not` của chính truy vấn (không lọc sau), nên
+   * sáng kiến bị loại không chiếm chỗ của `limit`. Chỉ lấy `embeddingModel` của payload
+   * (không kéo nội dung chunk về); nội dung đầy đủ lấy ở bước `scrollIdeas`.
+   */
+  async searchIdeas(options: SearchIdeasOptions): Promise<IdeaHit[]> {
+    assertSearchOptions(options, this.config.dimensions);
+    const excluded = options.excludeIdeaIds ?? [];
+    const filter =
+      excluded.length > 0
+        ? { must_not: [{ key: "ideaId", match: { any: excluded } }] }
+        : undefined;
+
+    const perVector = await Promise.all(
+      options.vectors.map(async (vector) => {
+        const { result } = await this.request(
+          "POST",
+          `${this.collectionPath()}/points/query/groups`,
+          {
+            query: vector,
+            group_by: "ideaId",
+            group_size: 1,
+            limit: options.limit,
+            with_payload: ["embeddingModel"],
+            with_vector: false,
+            ...(filter ? { filter } : {}),
+          },
+        );
+        return parseGroups(result);
+      }),
+    );
+    return mergeHits(perVector, options.limit);
+  }
+
+  async scrollIdeas(
+    ideaIds: string[],
+    options: { maxPoints?: number } = {},
+  ): Promise<ScrollResult> {
+    if (!ideaIds.every((id) => typeof id === "string" && id.length > 0)) {
+      throw new VectorStoreError("BAD_REQUEST", "ideaId không được rỗng");
+    }
+    if (ideaIds.length === 0) return { points: [], truncated: false };
+    return this.scrollPoints(options.maxPoints, {
+      must: [{ key: "ideaId", match: { any: ideaIds } }],
+    });
+  }
+
   async scrollAll(options: { maxPoints?: number } = {}): Promise<ScrollResult> {
-    const maxPoints = options.maxPoints ?? DEFAULT_MAX_SCROLL_POINTS;
+    return this.scrollPoints(options.maxPoints);
+  }
+
+  private async scrollPoints(
+    maxPointsOption: number | undefined,
+    filter?: Record<string, unknown>,
+  ): Promise<ScrollResult> {
+    const maxPoints = maxPointsOption ?? DEFAULT_MAX_SCROLL_POINTS;
     if (!Number.isInteger(maxPoints) || maxPoints < 1) {
       throw new VectorStoreError("BAD_REQUEST", "maxPoints phải là số nguyên dương");
     }
@@ -252,6 +313,7 @@ export class QdrantVectorStore implements VectorStore {
           limit,
           with_payload: true,
           with_vector: false,
+          ...(filter ? { filter } : {}),
           ...(offset !== undefined ? { offset } : {}),
         },
       );
@@ -369,6 +431,32 @@ function parseScrollPage(result: unknown): { points: StoredChunk[]; nextOffset: 
   });
 
   return { points, nextOffset: result.next_page_offset ?? null };
+}
+
+/**
+ * Response của `points/query/groups`: `{ groups: [{ id: <ideaId>, hits: [{ score, payload }] }] }`,
+ * đã xếp theo điểm giảm dần. `group_size: 1` nên mỗi nhóm có đúng hit gần nhất của sáng kiến.
+ */
+function parseGroups(result: unknown): IdeaHit[] {
+  if (!isRecord(result) || !Array.isArray(result.groups)) {
+    throw new VectorStoreError("BAD_RESPONSE", "Qdrant trả kết quả tìm kiếm sai định dạng");
+  }
+  return result.groups.map((group: unknown): IdeaHit => {
+    const hit = isRecord(group) && Array.isArray(group.hits) ? group.hits[0] : undefined;
+    if (
+      !isRecord(group) ||
+      typeof group.id !== "string" ||
+      group.id.length === 0 ||
+      !isRecord(hit) ||
+      typeof hit.score !== "number" ||
+      !Number.isFinite(hit.score) ||
+      !isRecord(hit.payload) ||
+      typeof hit.payload.embeddingModel !== "string"
+    ) {
+      throw new VectorStoreError("BAD_RESPONSE", "Qdrant trả một nhóm kết quả sai định dạng");
+    }
+    return { ideaId: group.id, score: hit.score, embeddingModel: hit.payload.embeddingModel };
+  });
 }
 
 function toPayload(raw: Record<string, unknown>): IdeaChunkPayload {

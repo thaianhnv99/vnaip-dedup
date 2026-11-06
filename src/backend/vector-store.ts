@@ -91,6 +91,71 @@ export interface ScrollResult {
   truncated: boolean;
 }
 
+export interface SearchIdeasOptions {
+  /**
+   * Vector truy vấn, mỗi vector là một đoạn của input. Điểm của một sáng kiến là điểm
+   * CAO NHẤT trong mọi cặp (đoạn input, chunk của sáng kiến): hồ sơ dài không bị pha
+   * loãng thành một vector trung bình.
+   */
+  vectors: number[][];
+  /** Số sáng kiến tối đa trả về (không phải số chunk). */
+  limit: number;
+  /** Sáng kiến bị loại ngay trong truy vấn, nên không chiếm chỗ của `limit`. */
+  excludeIdeaIds?: string[];
+}
+
+/** Một sáng kiến gần vector truy vấn. */
+export interface IdeaHit {
+  ideaId: string;
+  /** Cosine similarity của chunk gần nhất (-1..1). Chỉ để xếp hạng và log, không phải kết quả cuối. */
+  score: number;
+  /** Model đã tạo vector của chunk gần nhất (`IdeaChunkPayload.embeddingModel`). */
+  embeddingModel: string;
+}
+
+/** Xếp hạng giảm dần theo điểm; bằng điểm thì theo ideaId để thứ tự xác định. */
+export function compareHits(a: IdeaHit, b: IdeaHit): number {
+  return b.score - a.score || (a.ideaId < b.ideaId ? -1 : a.ideaId > b.ideaId ? 1 : 0);
+}
+
+/**
+ * Gộp kết quả của nhiều lần truy vấn (mỗi vector truy vấn một lần): mỗi sáng kiến giữ
+ * điểm cao nhất, xếp hạng rồi cắt còn `limit`. Dùng chung cho mọi implementation.
+ */
+export function mergeHits(perVector: IdeaHit[][], limit: number): IdeaHit[] {
+  const best = new Map<string, IdeaHit>();
+  for (const hits of perVector) {
+    for (const hit of hits) {
+      const current = best.get(hit.ideaId);
+      if (!current || hit.score > current.score) best.set(hit.ideaId, hit);
+    }
+  }
+  return [...best.values()].sort(compareHits).slice(0, limit);
+}
+
+/** Kiểm tham số của searchIdeas; dùng chung cho mọi implementation. */
+export function assertSearchOptions(options: SearchIdeasOptions, dimensions: number): void {
+  const { vectors, limit } = options;
+  const valid =
+    Array.isArray(vectors) &&
+    vectors.length > 0 &&
+    vectors.every(
+      (vector) =>
+        Array.isArray(vector) &&
+        vector.length === dimensions &&
+        vector.every((value) => Number.isFinite(value)),
+    ) &&
+    Number.isInteger(limit) &&
+    limit >= 1 &&
+    (options.excludeIdeaIds ?? []).every((id) => typeof id === "string" && id.length > 0);
+  if (!valid) {
+    throw new VectorStoreError(
+      "BAD_REQUEST",
+      "Truy vấn vector không hợp lệ: cần ít nhất một vector đúng số chiều, limit là số nguyên dương và excludeIdeaIds là chuỗi không rỗng",
+    );
+  }
+}
+
 /** Một store = đúng MỘT collection = đúng MỘT type. Mọi thao tác chỉ chạm collection đó. */
 export interface VectorStore {
   /** Type của collection mà store này đọc và ghi. */
@@ -102,7 +167,21 @@ export interface VectorStore {
    * (INVALID_POINT) point có `payload.type` khác `recordType` của store.
    */
   upsertChunks(points: VectorPoint[]): Promise<void>;
-  /** Hướng A: lấy mọi chunk trong collection của type này (không có vector). */
+  /**
+   * Tìm các sáng kiến gần nhất với vector truy vấn (cosine), mỗi sáng kiến một mục,
+   * xếp hạng giảm dần. Chỉ tìm trong collection của type này. Không có sáng kiến nào
+   * thì trả mảng rỗng.
+   */
+  searchIdeas(options: SearchIdeasOptions): Promise<IdeaHit[]>;
+  /**
+   * Lấy MỌI chunk của các sáng kiến đã cho (không có vector) để ghép lại nội dung đầy đủ
+   * sau bước tìm. ideaId không có trong collection thì bị bỏ qua.
+   */
+  scrollIdeas(ideaIds: string[], options?: { maxPoints?: number }): Promise<ScrollResult>;
+  /**
+   * Lấy mọi chunk trong collection của type này (không có vector). Luồng kiểm tra trùng
+   * không còn dùng (đã chuyển sang searchIdeas + scrollIdeas); giữ lại để kiểm tra và test.
+   */
   scrollAll(options?: { maxPoints?: number }): Promise<ScrollResult>;
   deleteIdea(ideaId: string): Promise<void>;
   /**
@@ -252,13 +331,55 @@ export class InMemoryVectorStore implements VectorStore {
     }
   }
 
-  async scrollAll(options: { maxPoints?: number } = {}): Promise<ScrollResult> {
-    const maxPoints = options.maxPoints ?? DEFAULT_MAX_SCROLL_POINTS;
-    const sorted = [...this.points.values()].sort(
-      (a, b) =>
-        a.payload.ideaId.localeCompare(b.payload.ideaId) ||
-        a.payload.chunkIndex - b.payload.chunkIndex,
+  async searchIdeas(options: SearchIdeasOptions): Promise<IdeaHit[]> {
+    assertSearchOptions(options, this.dimensions);
+    const excluded = new Set(options.excludeIdeaIds ?? []);
+    const candidates = [...this.points.values()].filter(
+      (point) => !excluded.has(point.payload.ideaId),
     );
+
+    const perVector = options.vectors.map((query) => {
+      const best = new Map<string, IdeaHit>();
+      for (const point of candidates) {
+        const score = cosine(query, point.vector);
+        const current = best.get(point.payload.ideaId);
+        if (!current || score > current.score) {
+          best.set(point.payload.ideaId, {
+            ideaId: point.payload.ideaId,
+            score,
+            embeddingModel: point.payload.embeddingModel,
+          });
+        }
+      }
+      return [...best.values()].sort(compareHits).slice(0, options.limit);
+    });
+    return mergeHits(perVector, options.limit);
+  }
+
+  async scrollIdeas(
+    ideaIds: string[],
+    options: { maxPoints?: number } = {},
+  ): Promise<ScrollResult> {
+    const wanted = new Set(ideaIds);
+    return this.scroll(options.maxPoints, (point) => wanted.has(point.payload.ideaId));
+  }
+
+  async scrollAll(options: { maxPoints?: number } = {}): Promise<ScrollResult> {
+    return this.scroll(options.maxPoints, () => true);
+  }
+
+  private scroll(
+    maxPointsOption: number | undefined,
+    keep: (point: VectorPoint) => boolean,
+  ): ScrollResult {
+    const maxPoints = maxPointsOption ?? DEFAULT_MAX_SCROLL_POINTS;
+    const sorted = [...this.points.values()]
+      .filter(keep)
+      .sort(
+        (a, b) =>
+          a.payload.ideaId.localeCompare(b.payload.ideaId) ||
+          a.payload.chunkIndex - b.payload.chunkIndex,
+      );
     return {
       points: sorted
         .slice(0, maxPoints)
@@ -282,6 +403,19 @@ export class InMemoryVectorStore implements VectorStore {
       }
     }
   }
+}
+
+/** Cosine similarity như distance "Cosine" của Qdrant; vector không (norm 0) cho 0 thay vì NaN. */
+function cosine(a: number[], b: number[]): number {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i]! * b[i]!;
+    normA += a[i]! * a[i]!;
+    normB += b[i]! * b[i]!;
+  }
+  return normA > 0 && normB > 0 ? dot / Math.sqrt(normA * normB) : 0;
 }
 
 /** Bộ ba store trong bộ nhớ, mỗi type một store riêng, giống mô hình 3 collection của Qdrant. */

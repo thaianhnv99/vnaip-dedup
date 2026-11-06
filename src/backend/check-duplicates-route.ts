@@ -8,19 +8,25 @@ import { parseDedupInput } from "./validate-input.js";
 import { assertValidDedupOutput } from "./validate-output.js";
 import { createQdrantCandidateFinder } from "./candidate-source.js";
 import { createScorerFromEnv, LlmScorerError } from "./llm-scorer.js";
-import { DEFAULT_EMBEDDING_DIMENSIONS } from "./embeddings.js";
+import {
+  createEmbedderFromEnv,
+  EmbeddingError,
+  loadEmbeddingConfig,
+} from "./embeddings.js";
+import { createInputEmbedder } from "./input-embedder.js";
 import { createVectorStoresFromEnv } from "./qdrant-store.js";
 import { VectorStoreError, lazyEnsureCollections } from "./vector-store.js";
 
 /**
- * Trần số sáng kiến gửi cho model (hướng A gửi tất cả). 100 sáng kiến là 20 batch
- * (5 ứng viên) chạy trong MỘT đợt song song (đồng thời 20), vừa với ngân sách
- * `deadlineMs`; vượt 100 thì cần đợt thứ hai và thời gian gần gấp đôi, nên nâng trần
- * phải đo lại thời gian trả lời. Chạm trần là tín hiệu để chuyển sang hướng B
- * (top-k theo vector).
+ * k của top-k: số sáng kiến gần input nhất (theo vector) được gửi cho model chấm. 20 sáng
+ * kiến là 4 batch (5 ứng viên) chạy song song trong một đợt, thoải mái trong ngân sách
+ * `deadlineMs` và chỉ tốn vài request model mỗi lần kiểm tra. Vector chỉ rút gọn tập ứng
+ * viên nên k nhỏ đánh đổi nguy cơ bỏ sót sáng kiến trùng nhưng diễn đạt khác nhiều (xem
+ * `CheckDuplicatesOptions.topK`); tăng k khi cần an toàn hơn và đo lại thời gian trả lời.
+ * Tối đa 100 để một lần gọi không vượt quá một đợt song song của scorer.
  */
-const DEFAULT_CANDIDATE_LIMIT = 100;
-const MAX_CANDIDATE_LIMIT = 500;
+const DEFAULT_TOP_K = 20;
+const MAX_TOP_K = 100;
 /**
  * Tổng thời gian cho cả lời gọi, nhỏ hơn `timeoutMs: 30000` của tool trong
  * manifest để app tự trả lỗi có mã thay vì để Core cắt ngang. Đổi `timeoutMs` trong
@@ -28,11 +34,9 @@ const MAX_CANDIDATE_LIMIT = 500;
  */
 const DEFAULT_DEADLINE_MS = 28000;
 
-function loadCandidateLimit(env: NodeJS.ProcessEnv): number {
-  const raw = Number(env.CHECK_DUPLICATES_CANDIDATE_LIMIT);
-  return Number.isInteger(raw) && raw > 0 && raw <= MAX_CANDIDATE_LIMIT
-    ? raw
-    : DEFAULT_CANDIDATE_LIMIT;
+function loadTopK(env: NodeJS.ProcessEnv): number {
+  const raw = Number(env.CHECK_DUPLICATES_TOP_K);
+  return Number.isInteger(raw) && raw > 0 && raw <= MAX_TOP_K ? raw : DEFAULT_TOP_K;
 }
 
 function loadDeadlineMs(env: NodeJS.ProcessEnv): number {
@@ -43,25 +47,30 @@ function loadDeadlineMs(env: NodeJS.ProcessEnv): number {
 }
 
 /**
- * Dựng dependency thật. Luồng 1 không embed (hướng A) nên không cần khoá embedding;
- * cần Qdrant (đọc) và model chấm điểm. Mock chỉ bật khi đặt =true tường minh
- * (QDRANT_MOCK_MODE, LLM_MOCK_MODE): thiếu cấu hình thì ném lỗi NOT_CONFIGURED thay
- * vì âm thầm dùng dữ liệu giả.
+ * Dựng dependency thật. Luồng kiểm tra trùng embed input (embedding), tìm top-k sáng kiến
+ * gần nhất ở Qdrant (đọc) rồi để model chấm điểm. Mock chỉ bật khi đặt =true tường minh
+ * (EMBEDDING_MOCK_MODE, QDRANT_MOCK_MODE, LLM_MOCK_MODE): thiếu cấu hình thì ném lỗi
+ * NOT_CONFIGURED thay vì âm thầm dùng dữ liệu giả.
  *
  * Mỗi lời gọi chỉ đọc collection của `input.type` (ideas / solutions / initiatives);
  * hai collection còn lại không được mở ra.
+ *
+ * Số chiều vector lấy từ cùng cấu hình embedding với worker (EMBEDDING_DIMENSIONS), nên
+ * collection web đọc khớp collection worker ghi và vector truy vấn khớp vector đã lưu.
  */
 export function buildDependencies(
   env: NodeJS.ProcessEnv = process.env,
   log: ToolLogger = defaultLog,
 ): DedupDependencies {
-  const stores = createVectorStoresFromEnv(env, DEFAULT_EMBEDDING_DIMENSIONS);
+  const embeddingConfig = loadEmbeddingConfig(env);
+  const stores = createVectorStoresFromEnv(env, embeddingConfig.dimensions);
   if (env.QDRANT_MOCK_MODE === "true") {
     log("info", "check_duplicates_in_memory_store", {
       message:
         "QDRANT_MOCK_MODE=true: tool đọc kho trong bộ nhớ của tiến trình web, không thấy dữ liệu do worker chạy ở tiến trình riêng ghi.",
     });
   }
+  const embed = createEmbedderFromEnv(env);
 
   // Tạo/kiểm collection của từng type ở lần đọc đầu của type đó thay vì lúc khởi động
   // (Qdrant chậm không làm app khởi động chậm). Collection chưa có nghĩa là chưa index
@@ -70,9 +79,13 @@ export function buildDependencies(
   const ensureReady = lazyEnsureCollections(stores);
 
   return {
+    embedInput: createInputEmbedder(embed),
     findCandidates: createQdrantCandidateFinder(stores, {
       ensureReady,
       log: (event, details) => log("info", event, details),
+      // Embedding mock thì nhãn model trong dữ liệu không đồng nhất (worker ghi tên model
+      // cấu hình, script seed ghi "mock-embedding"), nên chỉ kiểm khi dùng model thật.
+      ...(env.EMBEDDING_MOCK_MODE === "true" ? {} : { embeddingModel: embeddingConfig.model }),
     }),
     scoreCandidates: createScorerFromEnv(env),
   };
@@ -86,7 +99,7 @@ export function createCheckDuplicatesHandler(
   log: ToolLogger = defaultLog,
 ): RequestHandler {
   const options = {
-    candidateLimit: loadCandidateLimit(env),
+    topK: loadTopK(env),
     deadlineMs: loadDeadlineMs(env),
   };
 
@@ -147,7 +160,7 @@ export function createCheckDuplicatesHandler(
         code,
         message,
         ...requestIdField(requestId),
-        ...scoringFailureField(error, detail),
+        ...downstreamFailureField(error, detail),
       });
     }
   };
@@ -163,21 +176,30 @@ function requestIdField(requestId: unknown): { requestId?: string } {
 }
 
 /**
- * Lý do gốc của lỗi chấm điểm, để caller phân biệt "output bị cắt" với "hết giờ" hay
- * "provider từ chối" mà không cần đọc log. Chỉ áp dụng cho `SCORING_UNAVAILABLE` có
- * nguyên nhân là `LlmScorerError`: `cause` luôn là một trong các mã cố định của scorer
- * (không bao giờ là `code` thô của Node/thư viện như ECONNREFUSED), còn `detail` đã qua
- * allow-list của `rootErrorDetail()` nên không có nội dung model sinh, hồ sơ hay khoá.
- * `NOT_CONFIGURED` bị loại vì nó nêu tên biến môi trường và đã có nhánh 503 riêng.
+ * Lý do gốc của lỗi chấm điểm hoặc embedding, để caller phân biệt "output bị cắt" với "hết
+ * giờ", "hết quota" hay "provider từ chối" mà không cần đọc log. Chỉ áp dụng cho
+ * `SCORING_UNAVAILABLE` có nguyên nhân là `LlmScorerError` và `EMBEDDING_UNAVAILABLE` có
+ * nguyên nhân là `EmbeddingError`: `cause` luôn là một trong các mã cố định của chính
+ * scorer/embedder (không bao giờ là `code` thô của Node/thư viện như ECONNREFUSED), còn
+ * `detail` (chỉ scorer có) đã qua allow-list của `rootErrorDetail()` nên không có nội dung
+ * model sinh, hồ sơ hay khoá. `NOT_CONFIGURED` bị loại vì nó nêu tên biến môi trường và
+ * đã có nhánh 503 riêng.
  */
-function scoringFailureField(
+function downstreamFailureField(
   error: unknown,
   detail: Record<string, string | number> | undefined,
 ): { cause?: string; detail?: Record<string, string | number> } {
-  if (!(error instanceof DedupError) || error.code !== "SCORING_UNAVAILABLE") return {};
+  if (!(error instanceof DedupError)) return {};
   const source = error.cause;
-  if (!(source instanceof LlmScorerError) || source.code === "NOT_CONFIGURED") return {};
-  return { cause: source.code, ...(detail ? { detail } : {}) };
+  if (error.code === "SCORING_UNAVAILABLE") {
+    if (!(source instanceof LlmScorerError) || source.code === "NOT_CONFIGURED") return {};
+    return { cause: source.code, ...(detail ? { detail } : {}) };
+  }
+  if (error.code === "EMBEDDING_UNAVAILABLE") {
+    if (!(source instanceof EmbeddingError) || source.code === "NOT_CONFIGURED") return {};
+    return { cause: source.code };
+  }
+  return {};
 }
 
 function mapErrorToResponse(error: unknown): {
@@ -196,6 +218,12 @@ function mapErrorToResponse(error: unknown): {
     switch (error.code) {
       case "INVALID_INPUT":
         return { status: 400, code: error.code, message: error.message };
+      case "EMBEDDING_UNAVAILABLE":
+        return {
+          status: 502,
+          code: error.code,
+          message: "Không thể tạo embedding cho hồ sơ đầu vào. Vui lòng thử lại sau.",
+        };
       case "CANDIDATES_UNAVAILABLE":
         return {
           status: 502,
@@ -208,7 +236,7 @@ function mapErrorToResponse(error: unknown): {
           status: 503,
           code: error.code,
           message:
-            "Số sáng kiến cần so sánh vượt giới hạn của tool nên không thể kiểm tra đầy đủ.",
+            "Nội dung các sáng kiến cần so sánh vượt giới hạn của tool nên không thể kiểm tra đầy đủ.",
         };
       case "SCORING_UNAVAILABLE":
         return {
@@ -218,7 +246,11 @@ function mapErrorToResponse(error: unknown): {
         };
     }
   }
-  if (error instanceof VectorStoreError || error instanceof LlmScorerError) {
+  if (
+    error instanceof VectorStoreError ||
+    error instanceof LlmScorerError ||
+    error instanceof EmbeddingError
+  ) {
     // Không nên lộ ra ngoài checkDuplicates() (đã được bọc thành DedupError),
     // nhưng xử lý phòng hờ để không bao giờ rơi về nhánh "lỗi nội bộ" chung.
     return {
@@ -236,7 +268,9 @@ function mapErrorToResponse(error: unknown): {
 /** Lỗi thiếu cấu hình do chính app tạo ra (dựng dependency), không phải lỗi downstream. */
 function isNotConfigured(error: unknown): boolean {
   return (
-    (error instanceof VectorStoreError || error instanceof LlmScorerError) &&
+    (error instanceof VectorStoreError ||
+      error instanceof LlmScorerError ||
+      error instanceof EmbeddingError) &&
     error.code === "NOT_CONFIGURED"
   );
 }
@@ -255,6 +289,13 @@ const DETAIL_NUMBER_FIELDS = [
   "topLevelKeyCount",
   "expectedCount",
   "scoredCount",
+  "entryCount",
+  "malformedCount",
+  "unknownIdCount",
+  "duplicateCount",
+  "percentNotIntegerCount",
+  "percentOutOfRangeCount",
+  "reasonBlankCount",
 ] as const;
 const DETAIL_MAX_STRING_LENGTH = 64;
 

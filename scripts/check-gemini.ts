@@ -13,7 +13,7 @@
  *      LLM_SCORER_CONCURRENCY / LLM_SCORER_BATCH_SIZE cho free tier. Mỗi request tốn quota.
  *
  * Cách dùng (đọc cấu hình từ .env hoặc biến môi trường, xem .env.example):
- *   GEMINI_API_KEY=... LLM_SCORER_MODEL=gemini-2.5-flash npx tsx scripts/check-gemini.ts
+ *   GEMINI_API_KEY=... LLM_SCORER_MODEL=gemini-3.6-flash npx tsx scripts/check-gemini.ts
  *   npx tsx scripts/check-gemini.ts --burst=10
  *
  * Chỉ in mã HTTP, tên model công khai, số chiều, thời gian và mã lỗi của app. Không bao giờ in

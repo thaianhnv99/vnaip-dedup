@@ -7,17 +7,27 @@ import {
 } from "./vector-store.js";
 
 /**
- * Nguồn ứng viên của luồng kiểm tra trùng (hướng A): đọc MỌI chunk trong collection
- * CỦA ĐÚNG type được hỏi rồi gom lại theo `ideaId`. Collection của type khác không
- * bao giờ được mở ra (type được tách ở tầng lưu trữ, không phải đọc hết rồi lọc).
- * Không dùng vector, nên không cần embedding ở luồng này (quyết định GĐ0 #2).
+ * Nguồn ứng viên của luồng kiểm tra trùng (hướng B, top-k theo vector), chạy sau bước
+ * embed input:
+ *
+ * 1. Tìm trong collection CỦA ĐÚNG type được hỏi `query.limit` sáng kiến gần vector truy
+ *    vấn nhất (đã loại `excludeIds` ngay trong truy vấn).
+ * 2. Đọc MỌI chunk của các sáng kiến đó rồi gom lại theo `ideaId`, vì model phải chấm trên
+ *    nội dung đầy đủ chứ không phải đúng đoạn vừa khớp vector.
+ *
+ * Collection của type khác không bao giờ được mở ra (type được tách ở tầng lưu trữ, không
+ * phải đọc hết rồi lọc). Vector chỉ dùng để rút gọn tập ứng viên; xem `CheckDuplicatesOptions.topK`
+ * về nguy cơ bỏ sót.
  *
  * Không còn `datasetKey`, nên hàm này không lọc theo tenant; ai được gọi tool do
  * caller-policy.ts quyết định.
  */
 
 export interface CandidateSourceOptions {
-  /** Số chunk tối đa đọc từ store; chạm trần thì báo lỗi, không trả dữ liệu thiếu. */
+  /**
+   * Số chunk tối đa đọc khi lấy nội dung đầy đủ của các sáng kiến tìm được; chạm trần thì
+   * báo lỗi, không trả dữ liệu thiếu.
+   */
   maxPoints?: number;
   /**
    * Chạy trước lần đọc đầu tiên của MỘT type (ví dụ ensureCollection của collection
@@ -25,6 +35,19 @@ export interface CandidateSourceOptions {
    */
   ensureReady?: (type: RecordType) => Promise<void>;
   log?: (event: string, details: Record<string, unknown>) => void;
+  /**
+   * Model đã embed input. Khi đặt, mọi sáng kiến tìm được phải do chính model này index:
+   * vector của model khác (hoặc vector giả của script seed) không so sánh được với vector
+   * truy vấn nên thứ hạng vô nghĩa, và trả kết quả như thể hợp lệ sẽ bỏ sót sáng kiến
+   * trùng. Lệch thì báo lỗi (cần index lại), không trả danh sách sai. Không đặt (embedding
+   * mock) thì bỏ qua kiểm tra vì nhãn model trong dữ liệu mock không đồng nhất.
+   */
+  embeddingModel?: string;
+}
+
+/** Chấp nhận cả "gemini-embedding-001" lẫn "models/gemini-embedding-001" (xem embeddings.ts). */
+function normalizeModel(model: string): string {
+  return model.replace(/^models\//, "");
 }
 
 export function createQdrantCandidateFinder(
@@ -33,23 +56,60 @@ export function createQdrantCandidateFinder(
 ): DedupDependencies["findCandidates"] {
   const maxPoints = options.maxPoints ?? DEFAULT_MAX_SCROLL_POINTS;
 
-  return async function findCandidates(input) {
+  return async function findCandidates(input, query) {
     const startedAt = performance.now();
     // Chọn collection theo type TRƯỚC mọi thao tác: type lạ thì dừng ở đây.
     const store = stores.forType(input.type);
     await options.ensureReady?.(input.type);
 
-    const { points, truncated } = await store.scrollAll({ maxPoints });
-    if (truncated) {
-      // Thiếu chunk nghĩa là thiếu sáng kiến; trả phần đã đọc được sẽ cho kết quả
-      // "không trùng" sai, nên coi như vượt trần.
-      throw new DedupError(
-        "CANDIDATE_LIMIT_EXCEEDED",
-        "Kho dữ liệu vượt giới hạn đọc của luồng kiểm tra trùng",
-      );
+    const hits = await store.searchIdeas({
+      vectors: query.vectors,
+      limit: query.limit,
+      excludeIdeaIds: input.excludeIds,
+    });
+
+    if (options.embeddingModel !== undefined) {
+      const expected = normalizeModel(options.embeddingModel);
+      const mismatched = hits.filter((hit) => normalizeModel(hit.embeddingModel) !== expected);
+      if (mismatched.length > 0) {
+        options.log?.("candidates_embedding_model_mismatch", {
+          type: input.type,
+          expected,
+          indexedWith: [...new Set(mismatched.map((hit) => hit.embeddingModel))].slice(0, 5),
+          hits: hits.length,
+          mismatched: mismatched.length,
+        });
+        throw new DedupError(
+          "CANDIDATES_UNAVAILABLE",
+          "Vector đã index do embedding model khác model dùng để embed input; cần index lại",
+        );
+      }
     }
 
-    const candidates = groupChunksIntoCandidates(points, input.type);
+    if (hits.length === 0) {
+      options.log?.("candidates_loaded", {
+        type: input.type,
+        queryVectors: query.vectors.length,
+        hits: 0,
+        chunks: 0,
+        ideas: 0,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      return [];
+    }
+
+    const { points, truncated } = await store.scrollIdeas(
+      hits.map((hit) => hit.ideaId),
+      { maxPoints },
+    );
+    if (truncated) {
+      // Thiếu chunk nghĩa là một ứng viên bị cụt nội dung; model chấm trên nội dung thiếu
+      // sẽ cho điểm sai, nên coi như vượt trần.
+      throw new DedupError(
+        "CANDIDATE_LIMIT_EXCEEDED",
+        "Nội dung các sáng kiến tìm được vượt giới hạn đọc của luồng kiểm tra trùng",
+      );
+    }
 
     // Collection của type này không được chứa chunk mang type khác. Nếu có thì dữ liệu
     // đã bị ghi lệch (sửa tay, migrate sai...): bỏ qua chúng (xem groupChunksIntoCandidates)
@@ -59,14 +119,31 @@ export function createQdrantCandidateFinder(
       options.log?.("candidates_foreign_type_ignored", { type: input.type, chunks: foreign });
     }
 
+    // Giữ thứ hạng theo độ gần (gần nhất trước). Sáng kiến vừa bị xoá giữa lúc tìm và lúc
+    // đọc không còn chunk nào nên bị bỏ qua; nó không còn tồn tại nên không phải bỏ sót.
+    const byId = new Map(
+      groupChunksIntoCandidates(points, input.type).map((candidate) => [candidate.id, candidate]),
+    );
+    const candidates = hits.flatMap((hit) => byId.get(hit.ideaId) ?? []);
+
     options.log?.("candidates_loaded", {
       type: input.type,
+      queryVectors: query.vectors.length,
+      hits: hits.length,
       chunks: points.length,
       ideas: candidates.length,
+      // Điểm cosine của sáng kiến gần nhất và xa nhất trong top-k: để biết top-k có đang
+      // cắt ở vùng còn rất giống (nguy cơ bỏ sót) hay đã chạm vùng không liên quan.
+      topScore: roundScore(hits[0]!.score),
+      lastScore: roundScore(hits[hits.length - 1]!.score),
       durationMs: Math.round(performance.now() - startedAt),
     });
     return candidates;
   };
+}
+
+function roundScore(score: number): number {
+  return Math.round(score * 10000) / 10000;
 }
 
 /**
