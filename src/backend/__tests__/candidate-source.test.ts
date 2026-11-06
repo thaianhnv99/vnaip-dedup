@@ -530,3 +530,64 @@ test("không đặt embeddingModel (embedding mock) thì không kiểm nhãn mod
 
   assert.deepEqual((await createQdrantCandidateFinder(stores)(input, query)).map((c) => c.id), ["a"]);
 });
+
+// --- matchedChunks / contentSimilarity cho prompt chấm điểm ---
+
+test("groupChunksIntoCandidates: matchedChunks là nội dung các chunk khớp theo thứ tự đã cho; chỉ số không còn thì bỏ qua; không có thì không có field", () => {
+  const chunks = [
+    stored({ ideaId: "a", chunkIndex: 0, chunkCount: 3, content: "một" }),
+    stored({ ideaId: "a", chunkIndex: 1, chunkCount: 3, content: "hai" }),
+    stored({ ideaId: "a", chunkIndex: 2, chunkCount: 3, content: "ba" }),
+    stored({ ideaId: "b" }),
+  ];
+
+  const [a, b] = groupChunksIntoCandidates(chunks, "solutions", new Map([["a", [2, 0, 9]]]));
+
+  assert.deepEqual(a!.matchedChunks, ["ba", "một"]);
+  assert.equal("matchedChunks" in b!, false);
+  assert.equal("matchedChunks" in groupChunksIntoCandidates(chunks, "solutions")[0]!, false);
+});
+
+test("matchedChunks lấy theo lần index mới nhất, không lấy chunk cũ cùng chỉ số", () => {
+  const [candidate] = groupChunksIntoCandidates(
+    [
+      stored({ ideaId: "a", chunkIndex: 0, chunkCount: 2, content: "cũ-0", indexedAt: "2026-11-01T00:00:00.000Z" }),
+      stored({ ideaId: "a", chunkIndex: 0, chunkCount: 2, content: "mới-0", indexedAt: "2026-11-03T00:00:00.000Z" }),
+      stored({ ideaId: "a", chunkIndex: 1, chunkCount: 2, content: "mới-1", indexedAt: "2026-11-03T00:00:00.000Z" }),
+    ],
+    "solutions",
+    new Map([["a", [0]]]),
+  );
+
+  assert.deepEqual(candidate!.matchedChunks, ["mới-0"]);
+});
+
+test("findCandidates gắn matchedChunks (chunk khớp vector nhất) và contentSimilarity (cosine của chunk đó) cho từng ứng viên", async () => {
+  const stores = makeStores();
+  const store = stores.forType("solutions");
+  await store.upsertChunks([
+    // Sáng kiến "dai": chunk 1 khớp truy vấn [1, 0, 0] nhất, chunk 0 thì không.
+    point({ ideaId: "dai", chunkIndex: 0, chunkCount: 2, content: "Đoạn mở đầu không liên quan" }, [0, 1, 0]),
+    point({ ideaId: "dai", chunkIndex: 1, chunkCount: 2, content: "Đoạn khớp ở cuối" }, [1, 0, 0]),
+    point({ ideaId: "xa", content: "Nội dung xa" }, [0.6, 0.8, 0]),
+  ]);
+
+  const candidates = await createQdrantCandidateFinder(stores)(input, query);
+
+  assert.deepEqual(candidates.map((c) => c.id), ["dai", "xa"]);
+  assert.deepEqual(candidates[0]!.matchedChunks, ["Đoạn khớp ở cuối"]);
+  assert.equal(candidates[0]!.content, "Đoạn mở đầu không liên quan\n\nĐoạn khớp ở cuối", "content vẫn là toàn bộ nội dung");
+  assert.equal(candidates[0]!.contentSimilarity, 1);
+  assert.deepEqual(candidates[1]!.matchedChunks, ["Nội dung xa"]);
+  assert.equal(candidates[1]!.contentSimilarity, 0.6);
+  assert.equal(candidates[0]!.titleSimilarity, undefined, "titleSimilarity do bước khác tính");
+});
+
+test("contentSimilarity kẹp về 0..1 (cosine âm nghĩa là không liên quan)", async () => {
+  const stores = makeStores();
+  await stores.forType("solutions").upsertChunks([point({ ideaId: "nguoc" }, [-1, 0, 0])]);
+
+  const [candidate] = await createQdrantCandidateFinder(stores)(input, query);
+
+  assert.equal(candidate!.contentSimilarity, 0);
+});

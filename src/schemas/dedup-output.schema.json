@@ -2,10 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vnaip-dedup.invalid/schemas/dedup-output.schema.json",
   "title": "CheckDuplicatesOutput",
-  "description": "Danh sách ứng viên đã được model đánh giá độ tương đồng với hồ sơ đầu vào. Percent (0..100, integer) là giá trị chuẩn do model sinh ra, dùng trực tiếp để hiển thị badge; score (0..1) được suy ra từ percent (score = percent / 100), giữ lại để tương thích phía dùng thang 0..1. Cả hai không phải xác suất hiệu chỉnh và không phải kết luận trùng lặp cuối cùng. UNRESOLVED: ngưỡng hiển thị/số kết quả tối đa chưa được xác nhận bởi nghiệp vụ; hiện trả toàn bộ kết quả đã chấm, đã sắp xếp giảm dần theo percent.",
+  "description": "Danh sách ứng viên đã được model đánh giá độ tương đồng với hồ sơ đầu vào, xếp giảm dần theo percent. Percent (0..100, integer) là giá trị chuẩn do model sinh ra, dùng trực tiếp để hiển thị badge; score (0..1) được suy ra từ percent (score = percent / 100), giữ lại để tương thích phía dùng thang 0..1. Chỉ có ứng viên đạt ngưỡng điểm tối thiểu (mặc định percent >= 40, cấu hình bằng CHECK_DUPLICATES_MIN_SCORE; 0 = trả mọi ứng viên đã chấm), nên danh sách có thể rỗng hoặc ngắn hơn số ứng viên đã chấm. Mỗi mục có thêm relation (kiểu quan hệ) và evidence (hai đoạn trích nguyên văn làm bằng chứng). Percent, score và relation không phải xác suất hiệu chỉnh và không phải kết luận trùng lặp cuối cùng.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["matches"],
+  "required": [
+    "matches"
+  ],
   "properties": {
     "matches": {
       "type": "array",
@@ -13,12 +15,24 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["type", "id", "score", "percent", "reason"],
+        "required": [
+          "type",
+          "id",
+          "score",
+          "percent",
+          "reason",
+          "relation",
+          "evidence"
+        ],
         "properties": {
           "type": {
             "type": "string",
             "description": "Loại hồ sơ của ứng viên, lấy từ dữ liệu đã index — không lấy từ output model. Luôn bằng type của input vì chỉ so sánh trong cùng một type.",
-            "enum": ["ideas", "solutions", "initiatives"]
+            "enum": [
+              "ideas",
+              "solutions",
+              "initiatives"
+            ]
           },
           "id": {
             "type": "string",
@@ -43,6 +57,39 @@
             "minLength": 1,
             "maxLength": 1000,
             "description": "Giải thích ngắn gọn do model sinh ra cho điểm số."
+          },
+          "relation": {
+            "type": "string",
+            "enum": [
+              "copy",
+              "paraphrase",
+              "same_problem",
+              "same_solution_other_scope",
+              "extension",
+              "unrelated"
+            ],
+            "description": "Kiểu quan hệ giữa hồ sơ đầu vào và ứng viên do model gán: copy (gần như cùng văn bản), paraphrase (cùng vấn đề và giải pháp, diễn đạt khác), same_problem (cùng vấn đề, giải pháp khác), same_solution_other_scope (cùng giải pháp, phạm vi khác), extension (đầu vào kế thừa hoặc mở rộng từ ứng viên; luôn như vậy với ứng viên là parentSolutionId), unrelated (không liên quan)."
+          },
+          "evidence": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "newQuote",
+              "candidateQuote"
+            ],
+            "properties": {
+              "newQuote": {
+                "type": "string",
+                "maxLength": 200,
+                "description": "Đoạn trích nguyên văn trong hồ sơ đầu vào (tiêu đề, nội dung hoặc đoạn trích file) làm bằng chứng. Model chỉ được yêu cầu trích khi percent từ 40 trở lên. Rỗng khi model không trích được hoặc khi đoạn model đưa ra không có nguyên văn trong dữ liệu (app kiểm lại, so khớp sau khi gộp khoảng trắng)."
+              },
+              "candidateQuote": {
+                "type": "string",
+                "maxLength": 200,
+                "description": "Đoạn trích nguyên văn trong sáng kiến ứng viên làm bằng chứng. Rỗng trong các trường hợp giống newQuote."
+              }
+            },
+            "description": "Bằng chứng cho điểm số: hai đoạn trích ngắn (tối đa 200 ký tự), mỗi phía một đoạn. Đã được app kiểm là có thật trong dữ liệu."
           }
         }
       }

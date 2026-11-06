@@ -1,6 +1,6 @@
 manifestSchemaVersion: 3
 appId: vnaip-dedup
-version: 1.0.4
+version: 1.0.6
 displayName: "VNAIP Dedup"
 description: "Kiểm tra hồ sơ ứng viên tương tự trong hệ thống VNAIP."
 publisher:
@@ -23,8 +23,14 @@ contributes:
         nội dung đầy đủ và chấm điểm nhóm đó. Sáng kiến nằm ngoài nhóm gần nhất
         không được chấm, nên một sáng kiến trùng ý nhưng diễn đạt rất khác có
         thể không xuất hiện trong kết quả.
-        Trả về tối đa 30 sáng kiến giống nhất đã được model chấm, mỗi mục có
-        id, điểm số 0..1 (và percent 0..100) cùng lý do. Gọi tool này trước khi
+        Trả về tối đa 30 sáng kiến giống nhất đã được model chấm và đạt ngưỡng
+        điểm tối thiểu (mặc định percent >= 40, nên có thể rỗng). Mỗi mục có
+        id, điểm số 0..1 (và percent 0..100), kiểu quan hệ (relation: copy,
+        paraphrase, same_problem, same_solution_other_scope, extension hoặc
+        unrelated), lý do và bằng chứng (hai đoạn trích nguyên văn, evidence).
+        Có thể truyền parentSolutionId (sáng kiến mà hồ sơ kế thừa: không bị
+        báo trùng, relation là extension, percent không quá 30) và
+        fileExcerpts (đoạn trích từ file đính kèm). Gọi tool này trước khi
         tạo hồ sơ mới để tránh trùng lặp. Caller chịu trách nhiệm diễn giải
         điểm số; đây không phải kết luận trùng lặp cuối cùng.
       route: POST /tools/check-duplicates

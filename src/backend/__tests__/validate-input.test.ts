@@ -88,3 +88,30 @@ test('input không phải object bị từ chối', () => {
   assert.throws(() => parseDedupInput(null));
   assert.throws(() => parseDedupInput(undefined));
 });
+
+test('fileExcerpts là tuỳ chọn; có thì được giữ nguyên, không có thì undefined', () => {
+  assert.equal(parseDedupInput(valid).fileExcerpts, undefined);
+  assert.deepEqual(parseDedupInput({ ...valid, fileExcerpts: [] }).fileExcerpts, []);
+  assert.deepEqual(parseDedupInput({ ...valid, fileExcerpts: ['đoạn 1', 'đoạn 2'] }).fileExcerpts, ['đoạn 1', 'đoạn 2']);
+});
+
+test('fileExcerpts sai kiểu, quá 10 phần tử, phần tử rỗng hoặc dài quá 2000 ký tự bị từ chối', () => {
+  const bad: unknown[] = [
+    'đoạn',
+    null,
+    { 0: 'x' },
+    [1],
+    [''],
+    ['x'.repeat(2001)],
+    Array.from({ length: 11 }, () => 'x'),
+  ];
+  for (const fileExcerpts of bad) {
+    assert.throws(() => parseDedupInput({ ...valid, fileExcerpts }), /fileExcerpts/, JSON.stringify(fileExcerpts)?.slice(0, 40));
+  }
+  assert.doesNotThrow(() => parseDedupInput({ ...valid, fileExcerpts: Array.from({ length: 10 }, () => 'x'.repeat(2000)) }));
+});
+
+test('parentSolutionId được giữ trong input đã parse', () => {
+  assert.equal(parseDedupInput({ ...valid, parentSolutionId: 'GP-1' }).parentSolutionId, 'GP-1');
+  assert.equal(parseDedupInput(valid).parentSolutionId, undefined);
+});

@@ -92,7 +92,8 @@ async function checkScorer() {
       { type: 'ideas', title: 'Báo cáo sự cố bằng điện thoại', content: 'Nhân viên mặt đất gửi báo cáo sự cố ngay từ điện thoại.' },
       candidates,
       config,
-      { deadlineAt: Date.now() + 25000 },
+      // minScore 0: model phải liệt kê cả hai ứng viên để so điểm c1 với c2.
+      { deadlineAt: Date.now() + 25000, minScore: 0 },
     );
     const summary = matches.map((m) => `${m.id}=${m.percent}%`).join(' ');
     ok(`${matches.length} mục chấm điểm hợp lệ trong ${Date.now() - startedAt}ms (${summary}); c1 nên cao hơn c2`);

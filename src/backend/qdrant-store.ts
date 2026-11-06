@@ -8,6 +8,7 @@ import {
   assertValidPoint,
   createInMemoryVectorStores,
   mergeHits,
+  type ChunkHit,
   type IdeaChunkPayload,
   type IdeaHit,
   type ScrollResult,
@@ -265,7 +266,7 @@ export class QdrantVectorStore implements VectorStore {
             group_by: "ideaId",
             group_size: 1,
             limit: options.limit,
-            with_payload: ["embeddingModel"],
+            with_payload: ["embeddingModel", "chunkIndex"],
             with_vector: false,
             ...(filter ? { filter } : {}),
           },
@@ -437,11 +438,11 @@ function parseScrollPage(result: unknown): { points: StoredChunk[]; nextOffset: 
  * Response của `points/query/groups`: `{ groups: [{ id: <ideaId>, hits: [{ score, payload }] }] }`,
  * đã xếp theo điểm giảm dần. `group_size: 1` nên mỗi nhóm có đúng hit gần nhất của sáng kiến.
  */
-function parseGroups(result: unknown): IdeaHit[] {
+function parseGroups(result: unknown): ChunkHit[] {
   if (!isRecord(result) || !Array.isArray(result.groups)) {
     throw new VectorStoreError("BAD_RESPONSE", "Qdrant trả kết quả tìm kiếm sai định dạng");
   }
-  return result.groups.map((group: unknown): IdeaHit => {
+  return result.groups.map((group: unknown): ChunkHit => {
     const hit = isRecord(group) && Array.isArray(group.hits) ? group.hits[0] : undefined;
     if (
       !isRecord(group) ||
@@ -451,11 +452,18 @@ function parseGroups(result: unknown): IdeaHit[] {
       typeof hit.score !== "number" ||
       !Number.isFinite(hit.score) ||
       !isRecord(hit.payload) ||
-      typeof hit.payload.embeddingModel !== "string"
+      typeof hit.payload.embeddingModel !== "string" ||
+      !Number.isInteger(hit.payload.chunkIndex) ||
+      (hit.payload.chunkIndex as number) < 0
     ) {
       throw new VectorStoreError("BAD_RESPONSE", "Qdrant trả một nhóm kết quả sai định dạng");
     }
-    return { ideaId: group.id, score: hit.score, embeddingModel: hit.payload.embeddingModel };
+    return {
+      ideaId: group.id,
+      score: hit.score,
+      embeddingModel: hit.payload.embeddingModel,
+      chunkIndex: hit.payload.chunkIndex as number,
+    };
   });
 }
 

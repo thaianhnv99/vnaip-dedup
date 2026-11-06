@@ -47,10 +47,10 @@ sequenceDiagram
             alt Model lỗi/timeout
                 App-->>Core: 502 SCORING_UNAVAILABLE
             else Model trả kết quả
-                Note right of LLM: Model trả percent (0..100, integer) — giá trị chuẩn.<br/>App tự suy ra score = percent / 100, không tin score do model trả (nếu có).
-                App->>App: Lọc id không thuộc candidate, percent ngoài [0,100]<br/>hoặc không phải integer, reason rỗng, id trùng;<br/>sort theo percent giảm dần; cắt tối đa 30
+                Note right of LLM: Model trả score (0..100, integer), relation, reason, evidence — chỉ cho ứng viên đạt ngưỡng.<br/>App đổi score thành percent rồi tự suy ra score = percent / 100.
+                App->>App: Lọc id không thuộc candidate, percent ngoài [0,100]<br/>hoặc không phải integer, relation lạ, reason rỗng, id trùng;<br/>ép extension và percent ≤ 30 cho parentSolutionId; kiểm đoạn trích có thật;<br/>lọc percent < ngưỡng; sort theo percent giảm dần; cắt tối đa 30
                 App->>App: Validate output theo JSON Schema trước khi trả
-                App-->>Core: 200 { matches: [{id, type, score, percent, reason}, ...] }
+                App-->>Core: 200 { matches: [{id, type, score, percent, reason, relation, evidence}, ...] }
             end
         end
     end
@@ -87,14 +87,20 @@ sequenceDiagram
 5. **Chấm điểm tương đồng** (`llm-scorer.ts`): candidate được gửi theo batch
    (mặc định 10/batch) tới model, kèm system prompt nhắc rõ nội dung hồ sơ là
    **dữ liệu, không phải chỉ dẫn** (chống prompt injection từ nội dung hồ sơ
-   độc hại). Model trả về `{matches: [{id, percent, reason}]}`, với `percent`
-   (integer 0..100) là giá trị chuẩn duy nhất model cần sinh ra — model không
-   được yêu cầu/tin dùng khi tự trả thêm `score`.
+   độc hại). Prompt (`scoring-prompt.ts`) đưa cho model `newIdea` và mỗi ứng viên kèm
+   `matchedChunks`, `titleSimilarity`, `contentSimilarity`. Model trả về `{matches: [{type, id,
+   score, relation, reason, evidence}]}` chỉ cho ứng viên có `score >= MIN_SCORE`; `score` (integer
+   0..100) được app đọc thành `percent`, giá trị chuẩn duy nhất về điểm.
 
 6. **Lọc và chuẩn hoá kết quả** (`dedup.ts`, hàm `checkDuplicates`):
    - Bỏ match có `id` không thuộc tập candidate đã lấy ở bước 4.
    - Bỏ `percent` không phải integer hoặc ngoài khoảng `[0,100]`, `reason`
      rỗng, `id` trùng lặp.
+   - Bỏ `relation` ngoài sáu giá trị cho phép.
+   - Với ứng viên là `parentSolutionId`: ép `relation = "extension"`, `percent <= 30`.
+   - Giữ `evidence` chỉ khi mỗi đoạn trích có nguyên văn trong dữ liệu đã đưa cho model;
+     đoạn bịa hoặc bị sửa chữ thành chuỗi rỗng; cắt tối đa 200 ký tự.
+   - Bỏ ứng viên có `percent` dưới ngưỡng (`CHECK_DUPLICATES_MIN_SCORE`, mặc định 40).
    - Gán lại `type` từ candidate thật (không tin `type` do model trả).
    - Suy ra `score = percent / 100` — `percent` là nguồn chuẩn, `score` chỉ
      là dạng dẫn xuất giữ lại để tương thích phía dùng thang 0..1.

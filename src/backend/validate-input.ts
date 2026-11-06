@@ -3,6 +3,9 @@ import { isRecordType, RECORD_TYPES_LABEL } from './record-type.js';
 
 /** Giữ khớp với maxItems của excludeIds trong dedup-input.schema.json. */
 const MAX_EXCLUDE_IDS = 100;
+/** Giữ khớp với maxItems / maxLength của fileExcerpts trong dedup-input.schema.json. */
+const MAX_FILE_EXCERPTS = 10;
+const MAX_FILE_EXCERPT_LENGTH = 2000;
 
 /**
  * Validate thủ công input theo đúng dedup-input.schema.json tại boundary
@@ -20,6 +23,7 @@ export function parseDedupInput(input: unknown): DedupInput {
     type: record.type as DedupInput['type'],
     title: record.title as string,
     content: record.content as string,
+    fileExcerpts: Array.isArray(record.fileExcerpts) ? (record.fileExcerpts as string[]) : undefined,
     excludeIds: Array.isArray(record.excludeIds) ? (record.excludeIds as string[]) : undefined,
     parentSolutionId: typeof record.parentSolutionId === 'string' ? record.parentSolutionId : undefined,
   };
@@ -32,7 +36,7 @@ function collectInputErrors(input: unknown): string[] {
     return ['input phải là object'];
   }
 
-  const allowedKeys = ['type', 'title', 'content', 'excludeIds', 'parentSolutionId'];
+  const allowedKeys = ['type', 'title', 'content', 'fileExcerpts', 'excludeIds', 'parentSolutionId'];
   const unknownKeys = Object.keys(input).filter((key) => !allowedKeys.includes(key));
   if (unknownKeys.length > 0) {
     errors.push(`additionalProperties không hợp lệ: ${unknownKeys.join(', ')}`);
@@ -49,6 +53,14 @@ function collectInputErrors(input: unknown): string[] {
 
   if (!isBoundedString(input.content, 1, 20000)) {
     errors.push('content phải là string độ dài 1..20000');
+  }
+
+  if (input.fileExcerpts !== undefined) {
+    if (!Array.isArray(input.fileExcerpts) || input.fileExcerpts.length > MAX_FILE_EXCERPTS) {
+      errors.push(`fileExcerpts phải là array tối đa ${MAX_FILE_EXCERPTS} phần tử khi có mặt`);
+    } else if (!input.fileExcerpts.every((text) => isBoundedString(text, 1, MAX_FILE_EXCERPT_LENGTH))) {
+      errors.push(`mỗi phần tử của fileExcerpts phải là string độ dài 1..${MAX_FILE_EXCERPT_LENGTH}`);
+    }
   }
 
   if (input.excludeIds !== undefined) {

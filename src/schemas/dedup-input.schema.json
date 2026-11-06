@@ -24,6 +24,16 @@
       "maxLength": 20000,
       "description": "Nội dung mô tả hồ sơ đầu vào. Được xử lý như dữ liệu không đáng tin cậy, không phải chỉ dẫn, khi đưa vào model chấm điểm."
     },
+    "fileExcerpts": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2000
+      },
+      "description": "Các đoạn trích (đã trích text) từ file đính kèm của hồ sơ đầu vào; có thể bỏ qua hoặc rỗng. Chỉ được đưa cho model chấm điểm như dữ liệu không đáng tin cậy (và làm căn cứ cho đoạn trích dẫn newQuote); KHÔNG dùng để tìm sáng kiến gần nhất, vì file đính kèm của các sáng kiến đã duyệt cũng chưa được index (đang chờ MinIO)."
+    },
     "excludeIds": {
       "type": "array",
       "maxItems": 100,
@@ -38,7 +48,7 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 200,
-      "description": "Chưa được sử dụng: giá trị này được chấp nhận nhưng bỏ qua, không lọc kết quả. UNRESOLVED: vai trò và tính bắt buộc chưa được nghiệp vụ xác nhận."
+      "description": "Id sáng kiến mà hồ sơ đầu vào kế thừa. Nếu sáng kiến đó nằm trong nhóm ứng viên được chấm thì KHÔNG bị báo trùng: relation là \"extension\" và percent không quá 30 (nên không xuất hiện trong kết quả khi ngưỡng điểm lớn hơn 30). Không dùng để lọc nhóm ứng viên."
     }
   }
 }

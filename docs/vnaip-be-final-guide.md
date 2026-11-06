@@ -109,9 +109,12 @@ trong app.
   lời gọi, mang invocation JWT do Core ký). App chỉ nhận request từ Core, verify
   JWT, không bao giờ verify request đến thẳng từ BE.
 - **Input:** `type` (`ideas`/`solutions`/`initiatives`), `title`, `content`, và tuỳ
-  chọn `excludeIds` (loại bớt id khỏi kết quả, ví dụ chính hồ sơ đang sửa).
-- **Output:** `{ matches: [{ id, type, score, percent, reason }, ...] }`, tối đa 30
-  mục, đã sort giảm dần theo `percent`.
+  chọn `excludeIds` (loại bớt id khỏi kết quả, ví dụ chính hồ sơ đang sửa),
+  `parentSolutionId` (sáng kiến mà hồ sơ kế thừa: không bị báo trùng) và `fileExcerpts`
+  (đoạn trích từ file đính kèm).
+- **Output:** `{ matches: [{ id, type, score, percent, reason, relation, evidence }, ...] }`, tối đa 30
+  mục, đã sort giảm dần theo `percent`, chỉ gồm mục có `percent >= 40` (cấu hình được).
+  Xem `docs/vnaip-be-enrich-ket-qua-check-duplicates.md`.
 - **Output KHÔNG có** `title`/`author`/`authorTitle`/`date` — BE phải tự tra cứu
   thêm các field này theo `id`, cùng với quyết định badge/ngưỡng hiển thị. Toàn bộ
   phần này đã có spec riêng: **`docs/vnaip-be-enrich-ket-qua-check-duplicates.md`**.

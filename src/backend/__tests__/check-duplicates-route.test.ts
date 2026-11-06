@@ -42,7 +42,7 @@ const validInput = {
 test('request hợp lệ trả 200 với output đúng schema', async () => {
   const deps: DedupDependencies = {
     embedInput: async () => [[1]], findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'A', content: 'nội dung A' }],
-    scoreCandidates: async () => [{ id: 'a', percent: 60, reason: 'giống nhau' }],
+    scoreCandidates: async () => [{ id: 'a', percent: 60, reason: 'giống nhau', relation: 'same_problem', evidence: { newQuote: '', candidateQuote: '' } }],
   };
 
   const handler = createCheckDuplicatesHandler(deps, {});
@@ -449,7 +449,7 @@ test('thiếu cấu hình trả 503 TOOL_NOT_CONFIGURED, và lần gọi sau ch�
       }
       return {
         embedInput: async () => [[1]], findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'A', content: 'x' }],
-        scoreCandidates: async () => [{ id: 'a', percent: 40, reason: 'ok' }],
+        scoreCandidates: async () => [{ id: 'a', percent: 40, reason: 'ok', relation: 'same_problem', evidence: { newQuote: '', candidateQuote: '' } }],
       };
     },
     {},
@@ -492,7 +492,7 @@ test('log thành công và thất bại ghi mã, số lượng, thời gian; kh�
   const ok = createCheckDuplicatesHandler(
     {
       embedInput: async () => [[1]], findCandidates: async () => [{ id: 'a', type: 'solutions', title: 'TIÊU ĐỀ BÍ MẬT', content: 'NỘI DUNG BÍ MẬT' }],
-      scoreCandidates: async () => [{ id: 'a', percent: 60, reason: 'LÝ DO BÍ MẬT' }],
+      scoreCandidates: async () => [{ id: 'a', percent: 60, reason: 'LÝ DO BÍ MẬT', relation: 'same_problem', evidence: { newQuote: '', candidateQuote: '' } }],
     },
     {},
     log,
@@ -757,4 +757,122 @@ test('buildDependencies: mỗi type chỉ thấy dữ liệu trong collection c�
   assert.deepEqual(await idsFor('ideas'), ['ROUTE-ideas']);
   assert.deepEqual(await idsFor('initiatives'), ['ROUTE-initiatives']);
   assert.deepEqual(await idsFor('solutions'), [], 'solutions chưa có gì: không được thấy ideas hay initiatives');
+});
+
+// --- Ngưỡng điểm (CHECK_DUPLICATES_MIN_SCORE) ---
+
+const scoredByModel = (percents: number[]): DedupDependencies => ({
+  embedInput: async () => [[1]],
+  findCandidates: async () => manyCandidates(percents.length),
+  scoreCandidates: async (_input, candidates) =>
+    candidates.map((c, i) => ({
+      id: c.id,
+      percent: percents[i]!,
+      reason: 'ok',
+      relation: 'same_problem' as const,
+      evidence: { newQuote: '', candidateQuote: '' },
+    })),
+});
+
+test('mặc định chỉ trả ứng viên có percent >= 40 và đưa ngưỡng 40 cho scorer', async () => {
+  let received: number | undefined;
+  const deps = scoredByModel([39, 40, 90]);
+  const original = deps.scoreCandidates;
+  deps.scoreCandidates = async (input, candidates, scoreOptions) => {
+    received = scoreOptions.minScore;
+    return original(input, candidates, scoreOptions);
+  };
+  const { request, response, state } = fakeRequestResponse({ body: { input: validInput } });
+
+  await createCheckDuplicatesHandler(deps, {})(request, response, () => {});
+
+  assert.equal(state.status, 200);
+  assert.equal(received, 40);
+  assert.deepEqual((state.body as any).matches.map((m: any) => m.percent), [90, 40]);
+});
+
+test('CHECK_DUPLICATES_MIN_SCORE=0 trả mọi ứng viên đã chấm (hành vi cũ, cho danh sách top 5 tham khảo của BE)', async () => {
+  const { request, response, state } = fakeRequestResponse({ body: { input: validInput } });
+
+  await createCheckDuplicatesHandler(scoredByModel([3, 40, 90]), { CHECK_DUPLICATES_MIN_SCORE: '0' })(
+    request,
+    response,
+    () => {},
+  );
+
+  assert.deepEqual((state.body as any).matches.map((m: any) => m.percent), [90, 40, 3]);
+});
+
+test('CHECK_DUPLICATES_MIN_SCORE đặt được ngưỡng khác; giá trị không hợp lệ rơi về mặc định 40', async () => {
+  const cases: Array<[string | undefined, number[]]> = [
+    ['70', [90]],
+    ['100', []],
+    ['abc', [90, 40]],
+    ['-1', [90, 40]],
+    ['101', [90, 40]],
+    ['40.5', [90, 40]],
+    ['', [90, 40]],
+    ['  ', [90, 40]],
+    [undefined, [90, 40]],
+  ];
+  for (const [raw, expected] of cases) {
+    const { request, response, state } = fakeRequestResponse({ body: { input: validInput } });
+    await createCheckDuplicatesHandler(
+      scoredByModel([20, 40, 90]),
+      raw === undefined ? {} : { CHECK_DUPLICATES_MIN_SCORE: raw },
+    )(request, response, () => {});
+    assert.deepEqual(
+      (state.body as any).matches.map((m: any) => m.percent),
+      expected,
+      `giá trị ${JSON.stringify(raw)}`,
+    );
+  }
+});
+
+test('buildDependencies dựng cả titleSimilarities (embedding mock) để titleSimilarity tới được scorer', async () => {
+  const deps = buildDependencies(
+    { EMBEDDING_MOCK_MODE: 'true', QDRANT_MOCK_MODE: 'true', LLM_MOCK_MODE: 'true' },
+    () => undefined,
+  );
+  assert.equal(typeof deps.titleSimilarities, 'function');
+
+  const similarities = await deps.titleSimilarities!(
+    { type: 'solutions', title: 'Báo cáo sự cố', content: 'x' },
+    [
+      { id: 'a', type: 'solutions', title: 'Báo cáo sự cố', content: 'x' },
+      { id: 'b', type: 'solutions', title: 'Nền tảng dữ liệu dùng chung', content: 'y' },
+    ],
+  );
+  assert.equal(similarities.length, 2);
+  assert.ok(Math.abs(similarities[0]! - 1) < 1e-9, 'cùng tiêu đề thì cosine = 1');
+  assert.ok(similarities[1]! < similarities[0]!);
+});
+
+test('đếm chẩn đoán mới của scorer (relationInvalidCount, unresolvedCount) nằm trong allow-list log và body lỗi', async () => {
+  const { lines, log } = captureLog();
+  const handler = createCheckDuplicatesHandler(
+    {
+      embedInput: async () => [[1]],
+      findCandidates: async () => manyCandidates(1),
+      scoreCandidates: async () => {
+        throw new LlmScorerError('BAD_OUTPUT', 'Model không chấm điểm hợp lệ', {
+          detail: {
+            reason: 'unusable_scores',
+            relationInvalidCount: 1,
+            unresolvedCount: 1,
+            noiDungBiMat: 'KHÔNG ĐƯỢC LỌT RA',
+          },
+        });
+      },
+    },
+    {},
+    log,
+  );
+  const { request, response, state } = fakeRequestResponse({ body: { input: validInput } });
+
+  await handler(request, response, () => {});
+
+  assert.equal(state.status, 502);
+  assert.deepEqual((state.body as any).detail, { reason: 'unusable_scores', relationInvalidCount: 1, unresolvedCount: 1 });
+  assert.doesNotMatch(JSON.stringify(lines), /KHÔNG ĐƯỢC LỌT RA/);
 });

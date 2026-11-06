@@ -1,6 +1,7 @@
 import type { RequestHandler } from "express";
 import {
   checkDuplicates,
+  DEFAULT_MIN_SCORE,
   DedupError,
   type DedupDependencies,
 } from "./dedup.js";
@@ -14,6 +15,7 @@ import {
   loadEmbeddingConfig,
 } from "./embeddings.js";
 import { createInputEmbedder } from "./input-embedder.js";
+import { createTitleSimilarity } from "./title-similarity.js";
 import { createVectorStoresFromEnv } from "./qdrant-store.js";
 import { VectorStoreError, lazyEnsureCollections } from "./vector-store.js";
 
@@ -37,6 +39,19 @@ const DEFAULT_DEADLINE_MS = 28000;
 function loadTopK(env: NodeJS.ProcessEnv): number {
   const raw = Number(env.CHECK_DUPLICATES_TOP_K);
   return Number.isInteger(raw) && raw > 0 && raw <= MAX_TOP_K ? raw : DEFAULT_TOP_K;
+}
+
+/**
+ * Ngưỡng điểm (0..100): chỉ sáng kiến có percent từ ngưỡng này trở lên được trả về (và được đưa cho
+ * model làm `{{MIN_SCORE}}`). Mặc định 40 theo prompt chấm điểm; 0 giữ mọi sáng kiến đã chấm như
+ * hành vi trước đây, kể cả danh sách "top 5 để tham khảo" mà VNAIP BE hiển thị khi không match nào
+ * đạt 50. Giá trị sai rơi về mặc định.
+ */
+function loadMinScore(env: NodeJS.ProcessEnv): number {
+  const raw = env.CHECK_DUPLICATES_MIN_SCORE;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_MIN_SCORE;
+  const value = Number(raw);
+  return Number.isInteger(value) && value >= 0 && value <= 100 ? value : DEFAULT_MIN_SCORE;
 }
 
 function loadDeadlineMs(env: NodeJS.ProcessEnv): number {
@@ -87,6 +102,7 @@ export function buildDependencies(
       // cấu hình, script seed ghi "mock-embedding"), nên chỉ kiểm khi dùng model thật.
       ...(env.EMBEDDING_MOCK_MODE === "true" ? {} : { embeddingModel: embeddingConfig.model }),
     }),
+    titleSimilarities: createTitleSimilarity(embed, (event, details) => log("info", event, details)),
     scoreCandidates: createScorerFromEnv(env),
   };
 }
@@ -101,6 +117,7 @@ export function createCheckDuplicatesHandler(
   const options = {
     topK: loadTopK(env),
     deadlineMs: loadDeadlineMs(env),
+    minScore: loadMinScore(env),
   };
 
   // Chỉ nhớ lần dựng THÀNH CÔNG: cấu hình sửa xong thì lần gọi sau chạy được mà
@@ -137,6 +154,7 @@ export function createCheckDuplicatesHandler(
       log("info", "check_duplicates_done", {
         requestId,
         matches: output.matches.length,
+        minScore: options.minScore,
         durationMs: Math.round(performance.now() - startedAt),
       });
       response.json(output);
@@ -295,7 +313,9 @@ const DETAIL_NUMBER_FIELDS = [
   "duplicateCount",
   "percentNotIntegerCount",
   "percentOutOfRangeCount",
+  "relationInvalidCount",
   "reasonBlankCount",
+  "unresolvedCount",
 ] as const;
 const DETAIL_MAX_STRING_LENGTH = 64;
 

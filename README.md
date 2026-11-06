@@ -38,7 +38,9 @@ Xem contract đầy đủ trong:
 - `src/backend/dedup.ts` (logic nghiệp vụ, framework-neutral, test được độc lập)
 - `src/backend/input-embedder.ts` (bước 1: embed input)
 - `src/backend/candidate-source.ts` (bước 2: tìm top-k ở Qdrant, gom chunk theo sáng kiến)
-- `src/backend/llm-scorer.ts` (chấm điểm theo batch song song, có deadline)
+- `src/backend/llm-scorer.ts` (chấm điểm theo batch song song, có deadline) và
+  `src/backend/scoring-prompt.ts` (system prompt chấm điểm, phân loại quan hệ và trích bằng chứng)
+- `src/backend/title-similarity.ts` (bước 2b: `titleSimilarity` giữa tiêu đề input và tiêu đề ứng viên)
 - `src/backend/caller-policy.ts` (giới hạn ai được gọi tool)
 
 ### Mô hình dữ liệu: 3 collection theo type
@@ -136,9 +138,10 @@ thực của Core (không bao giờ với body hay header). Đặt nhiều danh 
   `check_duplicates_failed`). Riêng `502 SCORING_UNAVAILABLE` do scorer gây ra còn có `cause`
   (`BAD_OUTPUT`, `TIMEOUT`, `RATE_LIMITED`, `AUTH_ERROR`, `NETWORK_ERROR`) và `detail` (chỉ các field trong
   allow-list: `reason`, `finishReason`, `jsonType`, `contentLength`, `topLevelKeyCount`,
-  `expectedCount`, `scoredCount`, và với `reason: "incomplete_scores"` là các số đếm nguyên nhân
+  `expectedCount`, `scoredCount`, và với `reason: "incomplete_scores"` (ngưỡng 0) hoặc
+  `"unusable_scores"` (ngưỡng > 0) là các số đếm nguyên nhân
   `entryCount`, `malformedCount`, `unknownIdCount`, `duplicateCount`, `percentNotIntegerCount`,
-  `percentOutOfRangeCount`, `reasonBlankCount`). Lỗi tạo embedding cho input (`502
+  `percentOutOfRangeCount`, `relationInvalidCount`, `reasonBlankCount`, `unresolvedCount`). Lỗi tạo embedding cho input (`502
   EMBEDDING_UNAVAILABLE`) có `cause` (`RATE_LIMITED`, `AUTH_ERROR`, `TIMEOUT`, `NETWORK_ERROR`,
   `UPSTREAM_ERROR`, `BAD_REQUEST`, `BAD_RESPONSE`, `INVALID_INPUT`) nhưng không có `detail`. Ví dụ output bị cắt:
   `{"code":"SCORING_UNAVAILABLE","message":"…","requestId":"…","cause":"BAD_OUTPUT","detail":{"reason":"truncated","finishReason":"length","contentLength":371}}`.
@@ -148,7 +151,34 @@ thực của Core (không bao giờ với body hay header). Đặt nhiều danh 
   tìm trong collection riêng của type đó. `k` và giới hạn đọc tính theo từng type, không cộng
   dồn các type.
 - Nội dung mỗi ứng viên đưa vào prompt bị cắt ở `LLM_SCORER_MAX_CANDIDATE_CHARS` (4000 ký tự).
-- `parentSolutionId` được chấp nhận nhưng chưa dùng để lọc (vai trò chưa được nghiệp vụ xác nhận).
+- **Mỗi mục kết quả có `relation` và `evidence`.** `relation` là một trong `copy`, `paraphrase`,
+  `same_problem`, `same_solution_other_scope`, `extension`, `unrelated`. `evidence` là hai đoạn
+  trích (`newQuote`, `candidateQuote`, tối đa 200 ký tự). App tự kiểm từng đoạn có nguyên văn trong
+  dữ liệu đã đưa cho model (sau khi gộp khoảng trắng, phân biệt hoa/thường); đoạn bịa hoặc bị sửa chữ
+  thành chuỗi rỗng. Model chỉ được yêu cầu trích khi điểm từ 40 trở lên.
+- **Ngưỡng điểm `CHECK_DUPLICATES_MIN_SCORE` (mặc định 40).** Chỉ sáng kiến có `percent` từ ngưỡng
+  trở lên được trả về, nên kết quả có thể rỗng. Ngưỡng cũng được đưa cho model (`{{MIN_SCORE}}`
+  trong prompt) để nó không liệt kê ứng viên dưới ngưỡng, nên khi ngưỡng > 0 app **không thể phát hiện
+  model bỏ sót một ứng viên** (vắng mặt nghĩa là dưới ngưỡng); mục hỏng gắn với ứng viên nào đó vẫn là
+  `BAD_OUTPUT` cho cả lời gọi. **VNAIP BE đang hiển thị "top 5 để tham khảo" cả khi không match nào đạt 50**
+  (`docs/vnaip-be-enrich-ket-qua-check-duplicates.md` mục 4): với ngưỡng 40, danh sách đó chỉ còn các
+  match từ 40 trở lên. Đặt `CHECK_DUPLICATES_MIN_SCORE=0` để giữ hành vi cũ (model liệt kê mọi ứng
+  viên, app kiểm đủ từng ứng viên như trước).
+- **`parentSolutionId` được dùng để chấm, không để lọc.** Ứng viên có đúng id đó vẫn được gửi cho model;
+  kết quả của nó bị app ép `relation = "extension"` và `percent <= 30` (quy tắc 6 của prompt, áp lại
+  vì không tin model), nên với ngưỡng 40 nó không xuất hiện trong kết quả.
+- **`fileExcerpts` (tuỳ chọn, tối đa 10 đoạn, mỗi đoạn 1..2000 ký tự)** chỉ được đưa cho model và làm
+  căn cứ cho `newQuote`; không dùng để tìm sáng kiến gần nhất, vì file đính kèm của sáng kiến đã
+  duyệt cũng chưa được index (đang chờ MinIO).
+- **Model nhận thêm `matchedChunks`, `contentSimilarity`, `titleSimilarity` cho mỗi ứng viên.**
+  `matchedChunks` là tối đa 3 đoạn khớp vector nhất (mỗi đoạn cắt ở 1000 ký tự); `contentSimilarity`
+  là cosine của đoạn gần nhất (đã gồm tiêu đề vì mỗi chunk được embed cùng tiêu đề). `titleSimilarity`
+  cần **thêm một request embedding** mỗi lần kiểm tra (tiêu đề input và các tiêu đề ứng viên, một batch)
+  và chỉ là gợi ý: lỗi hoặc chậm quá 3 giây thì bỏ qua gợi ý này (log `title_similarity_unavailable`),
+  không làm lời gọi thất bại.
+- **Độ trễ và chi phí chấm điểm tăng so với prompt cũ:** mỗi mục kết quả giờ có thêm `relation` và hai
+  đoạn trích (trần output mỗi ứng viên 500 token thay vì 250) và input có thêm `matchedChunks`. Đo lại
+  thời gian với model thật (`scripts/check-gemini.ts`) trước khi tin ngân sách 28 giây.
 - Input dùng `excludeIds` (mảng); `excludeId` và `datasetKey` bị từ chối (400): BE phải đổi.
 
 ### Cấu hình
@@ -162,6 +192,7 @@ danh sách người gọi. Biến chính của tool:
 | --- | --- |
 | `CHECK_DUPLICATES_ALLOWED_SUBS`, `_OIDS`, `_WIDS` | Danh sách claim được phép gọi tool (phân tách bằng dấu phẩy, AND giữa các danh sách). Không đặt danh sách nào thì 403 cho tất cả. |
 | `CHECK_DUPLICATES_TOP_K` | `k` của top-k: số sáng kiến gần input nhất được gửi cho model chấm (mặc định 20, tối đa 100). Thay cho `CHECK_DUPLICATES_CANDIDATE_LIMIT`, biến cũ đó không còn được đọc. |
+| `CHECK_DUPLICATES_MIN_SCORE` | Ngưỡng điểm 0..100: chỉ sáng kiến có `percent` từ ngưỡng trở lên được trả về và được đưa cho model (mặc định 40; 0 = trả mọi sáng kiến đã chấm). Giá trị sai rơi về 40. Xem "Hành vi cần biết". |
 | `CHECK_DUPLICATES_DEADLINE_MS` | Tổng thời gian cho cả lời gọi: embed + tìm + chấm (mặc định 28000, nhỏ hơn `timeoutMs` 30000 của tool). |
 | `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` | Model và số chiều embedding (mặc định `gemini-embedding-001`, 1536). **Phải trùng với worker**: web embed input rồi so với vector worker đã lưu. |
 | `GEMINI_API_KEY` | Khoá Gemini API, dùng chung cho scorer và embedding. `OPENROUTER_*` và `GEMINI_BASE_URL` không còn được đọc. |
@@ -282,7 +313,10 @@ Các test chính của luồng kiểm tra trùng (xem `src/backend/__tests__/`):
   sai (cả theo mảng) trước khi enqueue, worker ghi/reindex/xoá đúng collection, job type cũ
   vào hàng chờ lỗi không retry.
 - `llm-scorer.test.ts`: URL base giữ nguyên đường dẫn, batch song song, giới hạn đồng thời,
-  deadline, một batch lỗi thì cả lời gọi lỗi, không lộ khoá API.
+  deadline, một batch lỗi thì cả lời gọi lỗi, không lộ khoá API; prompt có `MIN_SCORE` đúng và
+  message user mang đủ `newIdea`/`candidates`; phủ batch khác nhau theo ngưỡng (0 và > 0).
+- `dedup.test.ts`, `title-similarity.test.ts`: ngưỡng điểm, ép `extension` cho `parentSolutionId`,
+  kiểm chứng đoạn trích, `titleSimilarity` (lỗi/chậm/sai độ dài thì bỏ qua gợi ý).
 - `caller-policy.test.ts`, `check-duplicates-http.test.ts`: giới hạn người gọi, qua cả chuỗi
   Express thật + xác thực JWT thật (JWKS giả); claims không khớp bị 403, danh tính khai
   trong body/header không có tác dụng.
@@ -302,7 +336,9 @@ Xem `docs/ke-hoach-phat-trien.md` (GĐ0 còn hai mục, GĐ3, GĐ4, GĐ5). Tóm 
    deploy Staging với `LOG_VERIFIED_CLAIMS=true`, cho BE gọi tool một lần, đọc log
    `invocation_accepted`. Cho tới khi đặt danh sách, tool trả 403.
 2. Chọn model chấm điểm (`LLM_SCORER_MODEL`) và đo thời gian trả lời với dữ liệu thật.
-3. Vai trò của `parentSolutionId`, ngưỡng hiển thị và số kết quả tối đa theo nghiệp vụ thật.
+3. Ngưỡng hiển thị và số kết quả tối đa theo nghiệp vụ thật (hiện: ngưỡng 40, tối đa 30). Vai trò của
+   `parentSolutionId` đã theo prompt chấm điểm (không báo trùng, `extension`, tối đa 30); VNAIP BE
+   cần xác nhận cách dùng `relation`/`evidence` và danh sách "top 5 tham khảo" khi có ngưỡng.
    (Danh sách `type` đã chốt là `ideas` / `solutions` / `initiatives`; VNAIP BE phải gửi đúng
    các giá trị này.)
 4. `timeoutMs` tối đa khi build artifact (schema chỉ ràng buộc `minimum: 1`).

@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   InMemoryVectorStore,
+  MAX_MATCHED_CHUNKS,
+  mergeHits,
   VectorStoreError,
   VectorStoreSet,
   createInMemoryVectorStores,
@@ -315,6 +317,32 @@ test("searchIdeas xếp theo cosine giảm dần, mỗi sáng kiến một mục
   assert.equal(hits[0]!.score, 1);
   assert.ok(Math.abs(hits[1]!.score - 0.8) < 1e-9);
   assert.equal(hits[0]!.embeddingModel, "model-gan-nhat", "lấy nhãn model của chunk gần nhất");
+});
+
+test("searchIdeas trả chunkIndexes: chunk gần nhất của từng vector truy vấn, không trùng, bằng điểm thì chunk đứng trước", async () => {
+  const store = new InMemoryVectorStore(DIMS, "solutions");
+  await store.upsertChunks([
+    vec("A", 0, [0, 1, 0], { chunkCount: 3 }),
+    vec("A", 1, [1, 0, 0], { chunkCount: 3 }),
+    vec("A", 2, [0, 0, 1], { chunkCount: 3 }),
+  ]);
+
+  const one = await store.searchIdeas({ vectors: [[1, 0, 0]], limit: 5 });
+  assert.deepEqual(one[0]!.chunkIndexes, [1], "một vector truy vấn: đúng chunk gần nhất");
+
+  const two = await store.searchIdeas({ vectors: [[1, 0, 0], [0, 1, 0], [1, 0, 0]], limit: 5 });
+  assert.deepEqual(two[0]!.chunkIndexes, [0, 1], "hai chunk khớp (bằng điểm: chunk 0 trước); vector lặp không nhân đôi");
+});
+
+test("mergeHits: chunkIndexes xếp theo điểm giảm dần, bằng điểm thì chunk đứng trước, trùng chunk giữ điểm cao nhất, tối đa MAX_MATCHED_CHUNKS", () => {
+  const hit = (chunkIndex: number, score: number) => [{ ideaId: "A", score, embeddingModel: "m", chunkIndex }];
+  const hits = mergeHits(
+    [hit(4, 0.5), hit(2, 0.9), hit(1, 0.5), hit(4, 0.3), hit(7, 0.1), hit(9, 0.2)],
+    5,
+  );
+
+  assert.equal(MAX_MATCHED_CHUNKS, 3);
+  assert.deepEqual(hits, [{ ideaId: "A", score: 0.9, embeddingModel: "m", chunkIndexes: [2, 1, 4] }]);
 });
 
 test("searchIdeas không phụ thuộc độ dài vector (cosine, không phải tích vô hướng)", async () => {

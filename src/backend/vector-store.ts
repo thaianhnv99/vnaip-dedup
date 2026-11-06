@@ -104,17 +104,39 @@ export interface SearchIdeasOptions {
   excludeIdeaIds?: string[];
 }
 
-/** Một sáng kiến gần vector truy vấn. */
+/** Số chunk khớp tối đa được giữ cho mỗi sáng kiến (đưa vào `matchedChunks` của prompt chấm điểm). */
+export const MAX_MATCHED_CHUNKS = 3;
+
+/** Chunk gần nhất của một sáng kiến đối với MỘT vector truy vấn. */
+export interface ChunkHit {
+  ideaId: string;
+  /** Cosine similarity của chunk này với vector truy vấn (-1..1). */
+  score: number;
+  /** Model đã tạo vector của chunk này (`IdeaChunkPayload.embeddingModel`). */
+  embeddingModel: string;
+  chunkIndex: number;
+}
+
+/** Một sáng kiến gần vector truy vấn, sau khi gộp kết quả của mọi vector truy vấn. */
 export interface IdeaHit {
   ideaId: string;
   /** Cosine similarity của chunk gần nhất (-1..1). Chỉ để xếp hạng và log, không phải kết quả cuối. */
   score: number;
   /** Model đã tạo vector của chunk gần nhất (`IdeaChunkPayload.embeddingModel`). */
   embeddingModel: string;
+  /**
+   * Chỉ số các chunk của sáng kiến từng là chunk gần nhất của ít nhất một vector truy vấn,
+   * xếp theo điểm khớp giảm dần, không trùng, tối đa `MAX_MATCHED_CHUNKS`. Phần đầu tiên là
+   * chunk đã cho `score`.
+   */
+  chunkIndexes: number[];
 }
 
 /** Xếp hạng giảm dần theo điểm; bằng điểm thì theo ideaId để thứ tự xác định. */
-export function compareHits(a: IdeaHit, b: IdeaHit): number {
+export function compareHits(
+  a: { ideaId: string; score: number },
+  b: { ideaId: string; score: number },
+): number {
   return b.score - a.score || (a.ideaId < b.ideaId ? -1 : a.ideaId > b.ideaId ? 1 : 0);
 }
 
@@ -122,15 +144,34 @@ export function compareHits(a: IdeaHit, b: IdeaHit): number {
  * Gộp kết quả của nhiều lần truy vấn (mỗi vector truy vấn một lần): mỗi sáng kiến giữ
  * điểm cao nhất, xếp hạng rồi cắt còn `limit`. Dùng chung cho mọi implementation.
  */
-export function mergeHits(perVector: IdeaHit[][], limit: number): IdeaHit[] {
-  const best = new Map<string, IdeaHit>();
+export function mergeHits(perVector: ChunkHit[][], limit: number): IdeaHit[] {
+  const best = new Map<string, ChunkHit>();
+  const chunkScores = new Map<string, Map<number, number>>();
   for (const hits of perVector) {
     for (const hit of hits) {
       const current = best.get(hit.ideaId);
       if (!current || hit.score > current.score) best.set(hit.ideaId, hit);
+
+      let scores = chunkScores.get(hit.ideaId);
+      if (!scores) chunkScores.set(hit.ideaId, (scores = new Map()));
+      const known = scores.get(hit.chunkIndex);
+      if (known === undefined || hit.score > known) scores.set(hit.chunkIndex, hit.score);
     }
   }
-  return [...best.values()].sort(compareHits).slice(0, limit);
+
+  return [...best.values()]
+    .sort(compareHits)
+    .slice(0, limit)
+    .map((hit) => ({
+      ideaId: hit.ideaId,
+      score: hit.score,
+      embeddingModel: hit.embeddingModel,
+      chunkIndexes: [...chunkScores.get(hit.ideaId)!.entries()]
+        // Bằng điểm thì chunk đứng trước, để thứ tự xác định giữa các lần gọi.
+        .sort(([indexA, scoreA], [indexB, scoreB]) => scoreB - scoreA || indexA - indexB)
+        .slice(0, MAX_MATCHED_CHUNKS)
+        .map(([chunkIndex]) => chunkIndex),
+    }));
 }
 
 /** Kiểm tham số của searchIdeas; dùng chung cho mọi implementation. */
@@ -339,7 +380,7 @@ export class InMemoryVectorStore implements VectorStore {
     );
 
     const perVector = options.vectors.map((query) => {
-      const best = new Map<string, IdeaHit>();
+      const best = new Map<string, ChunkHit>();
       for (const point of candidates) {
         const score = cosine(query, point.vector);
         const current = best.get(point.payload.ideaId);
@@ -348,6 +389,7 @@ export class InMemoryVectorStore implements VectorStore {
             ideaId: point.payload.ideaId,
             score,
             embeddingModel: point.payload.embeddingModel,
+            chunkIndex: point.payload.chunkIndex,
           });
         }
       }
@@ -406,7 +448,7 @@ export class InMemoryVectorStore implements VectorStore {
 }
 
 /** Cosine similarity như distance "Cosine" của Qdrant; vector không (norm 0) cho 0 thay vì NaN. */
-function cosine(a: number[], b: number[]): number {
+export function cosine(a: number[], b: number[]): number {
   let dot = 0;
   let normA = 0;
   let normB = 0;

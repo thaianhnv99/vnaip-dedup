@@ -1,4 +1,4 @@
-import { DedupError, type Candidate, type DedupDependencies } from "./dedup.js";
+import { DedupError, roundSimilarity, type Candidate, type DedupDependencies } from "./dedup.js";
 import type { RecordType } from "./record-type.js";
 import {
   DEFAULT_MAX_SCROLL_POINTS,
@@ -121,10 +121,19 @@ export function createQdrantCandidateFinder(
 
     // Giữ thứ hạng theo độ gần (gần nhất trước). Sáng kiến vừa bị xoá giữa lúc tìm và lúc
     // đọc không còn chunk nào nên bị bỏ qua; nó không còn tồn tại nên không phải bỏ sót.
+    const matchedIndexes = new Map(hits.map((hit) => [hit.ideaId, hit.chunkIndexes]));
     const byId = new Map(
-      groupChunksIntoCandidates(points, input.type).map((candidate) => [candidate.id, candidate]),
+      groupChunksIntoCandidates(points, input.type, matchedIndexes).map((candidate) => [
+        candidate.id,
+        candidate,
+      ]),
     );
-    const candidates = hits.flatMap((hit) => byId.get(hit.ideaId) ?? []);
+    const candidates = hits.flatMap((hit) => {
+      const candidate = byId.get(hit.ideaId);
+      // contentSimilarity là cosine của chunk gần nhất (đã gồm tiêu đề, vì mỗi chunk được embed
+      // cùng tiêu đề, xem embeddingText); rõ ràng khác titleSimilarity (chỉ tiêu đề).
+      return candidate ? [{ ...candidate, contentSimilarity: roundSimilarity(hit.score) }] : [];
+    });
 
     options.log?.("candidates_loaded", {
       type: input.type,
@@ -156,6 +165,10 @@ function roundScore(score: number): number {
  * số có nhiều bản thì lấy bản mới hơn. Không bỏ cả sáng kiến chỉ vì thiếu chunk:
  * làm vậy sẽ che mất một sáng kiến có thể trùng.
  *
+ * `matchedChunkIndexes` (ideaId -> chỉ số chunk khớp vector truy vấn, gần nhất trước) cho
+ * ra `matchedChunks`: nội dung các chunk đó theo lần index mới nhất. Chỉ số không còn chunk
+ * (sáng kiến vừa index lại ngắn hơn) thì bỏ qua.
+ *
  * `chunks` phải đến từ collection của `type`; việc tách type KHÔNG dựa vào dòng lọc
  * bên dưới. Dòng đó chỉ là chốt chặn thứ hai: chunk mang type khác (không thể xuất
  * hiện nếu dữ liệu được ghi qua store) không bao giờ trở thành ứng viên của `type`.
@@ -163,6 +176,7 @@ function roundScore(score: number): number {
 export function groupChunksIntoCandidates(
   chunks: StoredChunk[],
   type: RecordType,
+  matchedChunkIndexes: ReadonlyMap<string, readonly number[]> = new Map(),
 ): Candidate[] {
   const byIdea = new Map<string, StoredChunk[]>();
   for (const chunk of chunks) {
@@ -192,7 +206,18 @@ export function groupChunksIntoCandidates(
       .map(([, chunk]) => chunk.payload.content)
       .join("\n\n");
 
-    candidates.push({ id: ideaId, type, title: newest.payload.title, content });
+    const matchedChunks = (matchedChunkIndexes.get(ideaId) ?? []).flatMap((chunkIndex) => {
+      const chunk = byIndex.get(chunkIndex);
+      return chunk ? [chunk.payload.content] : [];
+    });
+
+    candidates.push({
+      id: ideaId,
+      type,
+      title: newest.payload.title,
+      content,
+      ...(matchedChunks.length > 0 ? { matchedChunks } : {}),
+    });
   }
 
   // Thứ tự xác định để chia batch ổn định giữa các lần gọi.

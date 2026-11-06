@@ -1,4 +1,4 @@
-import type { DedupOutput } from './dedup.js';
+import { isRelation, MAX_QUOTE_CHARS, RELATIONS, type DedupOutput } from './dedup.js';
 import { isRecordType, RECORD_TYPES_LABEL } from './record-type.js';
 
 /**
@@ -56,7 +56,7 @@ function collectMatchErrors(match: unknown, index: number): string[] {
   }
 
   const unknownKeys = Object.keys(match).filter(
-    (key) => !['type', 'id', 'score', 'percent', 'reason'].includes(key),
+    (key) => !['type', 'id', 'score', 'percent', 'reason', 'relation', 'evidence'].includes(key),
   );
   if (unknownKeys.length > 0) {
     errors.push(`${prefix} additionalProperties không hợp lệ: ${unknownKeys.join(', ')}`);
@@ -88,6 +88,32 @@ function collectMatchErrors(match: unknown, index: number): string[] {
     errors.push(`${prefix}.reason phải là string độ dài 1..1000`);
   }
 
+  // Giữ khớp với enum của `relation` trong dedup-output.schema.json (nguồn: RELATIONS ở dedup.ts).
+  if (!isRelation(match.relation)) {
+    errors.push(`${prefix}.relation phải là một trong: ${RELATIONS.join(', ')}`);
+  }
+
+  errors.push(...collectEvidenceErrors(match.evidence, `${prefix}.evidence`));
+
+  return errors;
+}
+
+function collectEvidenceErrors(evidence: unknown, prefix: string): string[] {
+  if (!isRecord(evidence)) {
+    return [`${prefix} phải là object`];
+  }
+
+  const errors: string[] = [];
+  const unknownKeys = Object.keys(evidence).filter((key) => !['newQuote', 'candidateQuote'].includes(key));
+  if (unknownKeys.length > 0) {
+    errors.push(`${prefix} additionalProperties không hợp lệ: ${unknownKeys.join(', ')}`);
+  }
+  for (const key of ['newQuote', 'candidateQuote'] as const) {
+    const quote = evidence[key];
+    if (typeof quote !== 'string' || quote.length > MAX_QUOTE_CHARS) {
+      errors.push(`${prefix}.${key} phải là string độ dài 0..${MAX_QUOTE_CHARS}`);
+    }
+  }
   return errors;
 }
 

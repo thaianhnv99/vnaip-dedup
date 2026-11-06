@@ -491,12 +491,12 @@ test("QDRANT_MOCK_MODE=true dùng kho trong bộ nhớ, mỗi type một kho ri�
 
 // --- Tìm sáng kiến gần nhất (hướng B) ---
 
-const group = (ideaId: string, score: number, embeddingModel = "gemini-embedding-001") => ({
+const group = (ideaId: string, score: number, embeddingModel = "gemini-embedding-001", chunkIndex = 0) => ({
   id: ideaId,
-  hits: [{ id: pointId(ideaId, 0), version: 3, score, payload: { embeddingModel } }],
+  hits: [{ id: pointId(ideaId, chunkIndex), version: 3, score, payload: { embeddingModel, chunkIndex } }],
 });
 
-test("searchIdeas gọi query/groups nhóm theo ideaId, chỉ kéo embeddingModel, và không có filter khi không loại id", async () => {
+test("searchIdeas gọi query/groups nhóm theo ideaId, chỉ kéo embeddingModel và chunkIndex, và không có filter khi không loại id", async () => {
   const server = await startFakeServer(() => ({
     status: 200,
     json: { result: { groups: [group("GP-1", 0.93), group("GP-2", 0.71)] } },
@@ -508,8 +508,8 @@ test("searchIdeas gọi query/groups nhóm theo ideaId, chỉ kéo embeddingMode
     });
 
     assert.deepEqual(hits, [
-      { ideaId: "GP-1", score: 0.93, embeddingModel: "gemini-embedding-001" },
-      { ideaId: "GP-2", score: 0.71, embeddingModel: "gemini-embedding-001" },
+      { ideaId: "GP-1", score: 0.93, embeddingModel: "gemini-embedding-001", chunkIndexes: [0] },
+      { ideaId: "GP-2", score: 0.71, embeddingModel: "gemini-embedding-001", chunkIndexes: [0] },
     ]);
     assert.equal(server.requests.length, 1);
     const request = server.requests[0]!;
@@ -521,7 +521,7 @@ test("searchIdeas gọi query/groups nhóm theo ideaId, chỉ kéo embeddingMode
       group_by: "ideaId",
       group_size: 1,
       limit: 20,
-      with_payload: ["embeddingModel"],
+      with_payload: ["embeddingModel", "chunkIndex"],
       with_vector: false,
     });
   } finally {
@@ -548,8 +548,8 @@ test("searchIdeas đưa excludeIdeaIds vào must_not của chính truy vấn", a
 
 test("searchIdeas với nhiều vector: mỗi vector một request, gộp theo điểm cao nhất rồi cắt còn limit", async () => {
   const byQuery: Record<string, unknown[]> = {
-    "1,0,0": [group("A", 0.9), group("B", 0.4)],
-    "0,1,0": [group("B", 0.95), group("C", 0.5)],
+    "1,0,0": [group("A", 0.9, undefined, 1), group("B", 0.4, undefined, 2)],
+    "0,1,0": [group("B", 0.95, undefined, 0), group("C", 0.5)],
   };
   const server = await startFakeServer((request) => ({
     status: 200,
@@ -563,6 +563,8 @@ test("searchIdeas với nhiều vector: mỗi vector một request, gộp theo �
 
     assert.equal(server.requests.length, 2);
     assert.deepEqual(hits.map((h) => [h.ideaId, h.score]), [["B", 0.95], ["A", 0.9]]);
+    // Chunk khớp của B đến từ cả hai vector truy vấn, điểm cao nhất đứng trước.
+    assert.deepEqual(hits.map((h) => [h.ideaId, h.chunkIndexes]), [["B", [0, 2]], ["A", [1]]]);
   } finally {
     await server.close();
   }
@@ -584,10 +586,13 @@ test("searchIdeas từ chối response sai định dạng (BAD_RESPONSE), không
   const malformed: unknown[] = [
     { result: {} },
     { result: { groups: "x" } },
-    { result: { groups: [{ id: 7, hits: [{ score: 1, payload: { embeddingModel: "m" } }] }] } },
+    { result: { groups: [{ id: 7, hits: [{ score: 1, payload: { embeddingModel: "m", chunkIndex: 0 } }] }] } },
     { result: { groups: [{ id: "A", hits: [] }] } },
-    { result: { groups: [{ id: "A", hits: [{ score: "cao", payload: { embeddingModel: "m" } }] }] } },
+    { result: { groups: [{ id: "A", hits: [{ score: "cao", payload: { embeddingModel: "m", chunkIndex: 0 } }] }] } },
     { result: { groups: [{ id: "A", hits: [{ score: 1, payload: {} }] }] } },
+    { result: { groups: [{ id: "A", hits: [{ score: 1, payload: { embeddingModel: "m" } }] }] } },
+    { result: { groups: [{ id: "A", hits: [{ score: 1, payload: { embeddingModel: "m", chunkIndex: -1 } }] }] } },
+    { result: { groups: [{ id: "A", hits: [{ score: 1, payload: { embeddingModel: "m", chunkIndex: 1.5 } }] }] } },
   ];
   for (const json of malformed) {
     const server = await startFakeServer(() => ({ status: 200, json }));

@@ -3,7 +3,7 @@
 - **Phạm vi:** phần xử lý ở **VNAIP BE** sau khi nhận response từ tool
   `check-duplicates` (App `vnaip-dedup`), trước khi trả cho FE.
 - **Không thuộc phạm vi App `vnaip-dedup`:** app chỉ trả `{id, type, score,
-  percent, reason}` theo `dedup-output.schema.json`. Việc enrich tên tác
+  percent, reason, relation, evidence}` theo `dedup-output.schema.json`. Việc enrich tên tác
   giả, chức danh, ngày đăng ký và quyết định hiển thị (badge, cắt top N) là
   trách nhiệm của VNAIP BE — vì chỉ VNAIP BE có quyền truy cập đầy đủ dữ
   liệu hồ sơ theo đúng tenant/quyền của người dùng gốc.
@@ -13,11 +13,33 @@
 ```json
 {
   "matches": [
-    { "id": "GP-2026-0022", "type": "solutions", "score": 0.83, "percent": 83, "reason": "..." },
-    { "id": "GP-2026-0051", "type": "solutions", "score": 0.62, "percent": 62, "reason": "..." }
+    {
+      "id": "GP-2026-0022", "type": "solutions", "score": 0.83, "percent": 83, "reason": "...",
+      "relation": "paraphrase",
+      "evidence": { "newQuote": "...", "candidateQuote": "..." }
+    },
+    {
+      "id": "GP-2026-0051", "type": "solutions", "score": 0.62, "percent": 62, "reason": "...",
+      "relation": "same_problem",
+      "evidence": { "newQuote": "", "candidateQuote": "" }
+    }
   ]
 }
 ```
+
+`relation` là một trong `copy`, `paraphrase`, `same_problem`, `same_solution_other_scope`,
+`extension`, `unrelated`. `evidence` là hai đoạn trích nguyên văn (tối đa 200 ký tự) ở hồ sơ mới và
+ở sáng kiến ứng viên; app đã kiểm chúng có thật trong dữ liệu, và là chuỗi rỗng khi model không trích
+được. Hai field này là bổ sung (BE cũ bỏ qua được), nhưng nếu BE kiểm output bằng bản sao schema thì
+phải cập nhật bản sao đó vì `additionalProperties` là `false`.
+
+**Ngưỡng điểm:** từ khi chấm bằng prompt mới, tool chỉ trả sáng kiến có `percent >= 40` (cấu hình
+`CHECK_DUPLICATES_MIN_SCORE`, 0 = trả mọi sáng kiến đã chấm), nên `matches` có thể rỗng. Ảnh hưởng tới
+mục 4.
+
+Nếu BE gửi `parentSolutionId`, sáng kiến cha (nếu nằm trong nhóm ứng viên) bị đặt `relation =
+"extension"` và `percent <= 30`, nên không bị báo trùng. BE cũng có thể gửi `fileExcerpts` (đoạn trích
+file đính kèm, tối đa 10 đoạn, mỗi đoạn 1..2000 ký tự).
 
 `percent` (integer 0..100) là giá trị chuẩn do model sinh ra, dùng trực
 tiếp để hiển thị badge — VNAIP BE **không cần tự tính lại** từ `score`.
@@ -67,7 +89,9 @@ dần theo `percent`):
    → trả **top 5** match có `percent` cao nhất (trong số các match `>= 50`).
 3. **Ngược lại (không match nào `>= 50`):**
    → vẫn trả **top 5** match có `percent` cao nhất trong toàn bộ danh sách
-   (dù `< 50`), để tham khảo. Các match này không có badge (`label: null`
+   (dù `< 50`), để tham khảo. **Lưu ý:** với ngưỡng mặc định 40 của tool, danh sách này chỉ có các
+   match từ 40 trở lên (có thể ít hơn 5 hoặc rỗng); muốn danh sách đủ 5 như trước thì đặt
+   `CHECK_DUPLICATES_MIN_SCORE=0` ở app, hoặc chấp nhận danh sách ngắn hơn. Các match này không có badge (`label: null`
    theo mục 3) — FE tự quyết định hiển thị khác biệt với nhóm có badge
    (ví dụ không tô cảnh báo đỏ/vàng).
 
